@@ -56,6 +56,8 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/db/mod.rs` — all raw SQL queries (no ORM); returns `AppError` on failure
 - `src/handlers/users.rs` — `POST /users`
 - `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password`, `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm`
+- `src/handlers/health.rs` — `GET /health` (pool + `SELECT 1` check; returns 200 or 503)
+- `src/handlers/docs.rs` — `GET /openapi.yaml` (spec embedded via `include_str!`), `GET /docs` (Swagger UI via CDN)
 - `src/utils/jwt.rs` — `create_jwt` / `decode_jwt` using HS256
 - `src/utils/password.rs` — Argon2id hashing, verification, validation, and secure token generation
 - `src/tests.rs` — unit tests for password utils and JWT helpers; handler smoke tests using `actix_web::test` (no real DB needed)

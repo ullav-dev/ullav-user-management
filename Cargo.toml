@@ -1,0 +1,33 @@
+[package]
+name = "user_management"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "user_management"
+path = "src/main.rs"
+
+[dependencies]
+actix-web = "4"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4"] }
+deadpool-postgres = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+rust-argon2 = "3"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenv = "0.15"
+thiserror = "2"
+rand = "0.9"
+hex = "0.4"
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+actix-web = { version = "4", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+opt-level = 3

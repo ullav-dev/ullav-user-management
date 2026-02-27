@@ -1,0 +1,319 @@
+openapi: 3.0.3
+
+info:
+  title: User Management API
+  description: |
+    User account creation, authentication, and password management microservice.
+
+    Password-reset tokens are returned in the response body (in production they would be delivered by email).
+  version: 0.1.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /users:
+    post:
+      summary: Create a new user account
+      operationId: createUser
+      tags: [Users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+            example:
+              email: alice@example.com
+              username: alice
+              password: s3cretP@ss
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users/{id}/password:
+    put:
+      summary: Change a user's password
+      operationId: changePassword
+      tags: [Users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the user whose password is being changed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: Password changed successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/login:
+    post:
+      summary: Authenticate and receive a JWT
+      operationId: login
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: alice@example.com
+              password: s3cretP@ss
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/password-reset/request:
+    post:
+      summary: Request a password-reset token
+      description: |
+        Always returns `200 OK` regardless of whether the email exists, to prevent
+        user enumeration. If the email is registered the reset token is included in
+        the response body; otherwise a generic message is returned.
+      operationId: requestPasswordReset
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+            example:
+              email: alice@example.com
+      responses:
+        '200':
+          description: Request processed (email may or may not be registered)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PasswordResetTokenResponse'
+                  - $ref: '#/components/schemas/GenericMessageResponse'
+              examples:
+                email_found:
+                  summary: Email was registered
+                  value:
+                    reset_token: a3f1c2d4e5b6...
+                email_not_found:
+                  summary: Email was not registered
+                  value:
+                    message: If the email is registered you will receive a reset token
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/password-reset/confirm:
+    post:
+      summary: Complete a password reset
+      operationId: confirmPasswordReset
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+            example:
+              token: a3f1c2d4e5b6...
+              new_password: fresh_P@ssw0rd
+      responses:
+        '204':
+          description: Password reset successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Token is expired, already used, or not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  schemas:
+    CreateUserRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 8
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Signed HS256 JWT valid for `JWT_TTL_HOURS` hours
+        user:
+          $ref: '#/components/schemas/UserResponse'
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 8
+
+    PasswordResetRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    PasswordResetConfirm:
+      type: object
+      required: [token, new_password]
+      properties:
+        token:
+          type: string
+          description: 64-character hex token from the reset request
+        new_password:
+          type: string
+          minLength: 8
+
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PasswordResetTokenResponse:
+      type: object
+      properties:
+        reset_token:
+          type: string
+          description: 64-character hex token; use with /auth/password-reset/confirm
+
+    GenericMessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request body or validation failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: password must be at least 8 characters
+
+    Unauthorized:
+      description: Invalid credentials or expired token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: invalid credentials
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: user not found
+
+    Conflict:
+      description: Email or username already taken
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: email or username already taken
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: database error: ...

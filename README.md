@@ -135,8 +135,14 @@ cargo run
 ### Running tests
 
 ```bash
+# Unit and handler tests (no database required)
 cargo test
+
+# Include the health endpoint integration test
+TEST_DATABASE_URL=postgresql://app_user:app_password@localhost:5433/user_management cargo test
 ```
+
+> The Docker database is exposed on host port **5433** to avoid conflicts with a local PostgreSQL instance on 5432.
 
 ---
 

@@ -71,6 +71,7 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::auth::change_password)
             .service(handlers::auth::request_password_reset)
             .service(handlers::auth::confirm_password_reset)
+            .service(handlers::health::health)
             .service(handlers::docs::openapi_spec)
             .service(handlers::docs::swagger_ui)
     })

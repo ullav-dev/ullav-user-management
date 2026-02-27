@@ -13,6 +13,31 @@ servers:
     description: Local development
 
 paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: health
+      tags: [System]
+      responses:
+        '200':
+          description: Service and database are healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                database: ok
+        '503':
+          description: Database is unreachable or degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: degraded
+                database: unavailable
+
   /users:
     post:
       summary: Create a new user account
@@ -171,6 +196,16 @@ paths:
 
 components:
   schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        database:
+          type: string
+          enum: [ok, error, unavailable]
+
     CreateUserRequest:
       type: object
       required: [email, username, password]

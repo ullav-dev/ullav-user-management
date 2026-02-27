@@ -12,8 +12,11 @@ cargo build --release
 # Run (requires .env or environment variables)
 cargo run
 
-# Test (unit tests only — no database required)
+# Unit and handler tests (no database required)
 cargo test
+
+# Include the health endpoint integration test (requires Docker DB on port 5433)
+TEST_DATABASE_URL=postgresql://app_user:app_password@localhost:5433/user_management cargo test
 
 # Run a single test by name
 cargo test test_hash_and_verify_password

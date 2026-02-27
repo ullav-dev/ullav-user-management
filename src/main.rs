@@ -42,7 +42,7 @@ async fn main() -> std::io::Result<()> {
         .expect("RESET_TOKEN_TTL_MINUTES must be an integer");
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let port: u16 = env::var("PORT")
-        .unwrap_or_else(|_| "8080".into())
+        .unwrap_or_else(|_| "8081".into())
         .parse()
         .expect("PORT must be a number");
 

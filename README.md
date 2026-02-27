@@ -116,7 +116,7 @@ cd ullav-user-management
 docker compose up --build
 ```
 
-The API will be available at `http://localhost:8080`.
+The API will be available at `http://localhost:8081`.
 
 ### Running locally (without Docker)
 
@@ -151,7 +151,7 @@ All configuration is via environment variables (or a `.env` file):
 | `JWT_TTL_HOURS` | `24` | JWT validity in hours |
 | `RESET_TOKEN_TTL_MINUTES` | `30` | Password-reset token lifetime in minutes |
 | `HOST` | `0.0.0.0` | Bind address |
-| `PORT` | `8080` | Listen port |
+| `PORT` | `8081` | Listen port |
 | `RUST_LOG` | `info` | Log level |
 
 ---

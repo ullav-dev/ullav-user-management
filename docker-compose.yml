@@ -19,12 +19,13 @@ services:
   app:
     build: .
     ports:
-      - "8080:8080"
+      - "8081:8081"
     environment:
       DATABASE_URL: postgresql://app_user:app_password@db:5432/user_management
       JWT_SECRET: change_me_to_a_long_random_string
       JWT_TTL_HOURS: "24"
       RESET_TOKEN_TTL_MINUTES: "30"
+      PORT: "8081"
       RUST_LOG: info
     depends_on:
       db:

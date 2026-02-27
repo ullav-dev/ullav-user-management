@@ -123,8 +123,7 @@ mod handler_tests {
         assert_eq!(resp.status().as_u16(), 400);
     }
 
-    /// Verify that the `POST /users` handler returns 400 when mandatory
-    /// fields are missing.
+    /// Verify that the `POST /users` handler returns 400 when mandatory fields are missing.
     #[actix_web::test]
     async fn test_create_user_missing_fields() {
         let state = test_state();
@@ -141,5 +140,67 @@ mod handler_tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 400);
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use actix_web::{test, web, App};
+    use deadpool_postgres::{Config as PoolConfig, Runtime};
+    use tokio_postgres::NoTls;
+
+    use crate::{handlers::health::health, AppState};
+
+    fn make_state(database_url: &str) -> web::Data<AppState> {
+        let mut cfg = PoolConfig::new();
+        cfg.url = Some(database_url.into());
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("pool construction should not fail");
+        web::Data::new(AppState {
+            pool,
+            jwt_secret: "test_secret".into(),
+            jwt_ttl_hours: 1,
+            reset_token_ttl_minutes: 30,
+        })
+    }
+
+    /// With an unreachable database the handler must return 503 with
+    /// `status: degraded`.
+    #[actix_web::test]
+    async fn test_health_degraded_when_db_unreachable() {
+        let state = make_state("postgresql://user:pass@localhost:9/no_such_db");
+        let app = test::init_service(App::new().app_data(state).service(health)).await;
+
+        let req = test::TestRequest::get().uri("/health").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 503);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "degraded");
+    }
+
+    /// With a reachable database the handler must return 200 with `status: ok`.
+    ///
+    /// Requires `TEST_DATABASE_URL` to be set; the test is silently skipped
+    /// when the variable is absent so that `cargo test` works without a live
+    /// Postgres instance.
+    #[actix_web::test]
+    async fn test_health_ok_when_db_reachable() {
+        let url = match std::env::var("TEST_DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => return, // skip — no live database configured
+        };
+
+        let state = make_state(&url);
+        let app = test::init_service(App::new().app_data(state).service(health)).await;
+
+        let req = test::TestRequest::get().uri("/health").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["database"], "ok");
     }
 }

@@ -2,8 +2,8 @@ use crate::{
     db,
     errors::AppError,
     models::{
-        ChangePasswordRequest, LoginRequest, LoginResponse, PasswordResetConfirm,
-        PasswordResetRequest,
+        ChangePasswordRequest, ConfirmEmailRequest, LoginRequest, LoginResponse,
+        PasswordResetConfirm, PasswordResetRequest,
     },
     utils::{
         jwt::create_jwt,
@@ -95,6 +95,26 @@ pub async fn request_password_reset(
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "message": "If the email is registered you will receive a reset token"
     })))
+}
+
+/// `POST /auth/confirm-email` — Activate a user account using an email confirmation token.
+#[post("/auth/confirm-email")]
+pub async fn confirm_email(
+    state: web::Data<AppState>,
+    body: web::Json<ConfirmEmailRequest>,
+) -> Result<HttpResponse, AppError> {
+    let user = db::get_user_by_confirmation_token(&state.pool, &body.token).await?;
+
+    let expires_at = user.confirmation_token_expires_at.ok_or(AppError::InvalidToken)?;
+    if expires_at < Utc::now() {
+        return Err(AppError::InvalidToken);
+    }
+
+    if !user.is_active {
+        db::activate_user(&state.pool, user.id).await?;
+    }
+
+    Ok(HttpResponse::NoContent().finish())
 }
 
 /// `POST /auth/password-reset/confirm` — Complete a password reset.

@@ -1,6 +1,6 @@
 use crate::errors::AppError;
 use crate::models::{PasswordResetToken, User};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
@@ -14,9 +14,10 @@ pub async fn create_user(
     let client = pool.get().await?;
     let row = client
         .query_one(
-            "INSERT INTO users (email, username, password_hash)
-             VALUES ($1, $2, $3)
-             RETURNING id, email, username, password_hash, is_active, created_at, updated_at",
+            "INSERT INTO users (email, username, password_hash, is_active)
+             VALUES ($1, $2, $3, FALSE)
+             RETURNING id, email, username, password_hash, is_active, created_at, updated_at,
+                       confirmation_token, confirmation_token_expires_at",
             &[&email, &username, &password_hash],
         )
         .await
@@ -38,7 +39,8 @@ pub async fn get_user_by_id(pool: &Pool, id: Uuid) -> Result<User, AppError> {
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT id, email, username, password_hash, is_active, created_at, updated_at
+            "SELECT id, email, username, password_hash, is_active, created_at, updated_at,
+                    confirmation_token, confirmation_token_expires_at
              FROM users WHERE id = $1",
             &[&id],
         )
@@ -53,7 +55,8 @@ pub async fn get_user_by_email(pool: &Pool, email: &str) -> Result<User, AppErro
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT id, email, username, password_hash, is_active, created_at, updated_at
+            "SELECT id, email, username, password_hash, is_active, created_at, updated_at,
+                    confirmation_token, confirmation_token_expires_at
              FROM users WHERE email = $1",
             &[&email],
         )
@@ -140,6 +143,61 @@ pub async fn consume_reset_token(pool: &Pool, token: &str) -> Result<(), AppErro
     Ok(())
 }
 
+/// Store an email-confirmation token on the user row.
+pub async fn set_confirmation_token(
+    pool: &Pool,
+    user_id: Uuid,
+    token: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE users
+             SET confirmation_token = $1, confirmation_token_expires_at = $2
+             WHERE id = $3",
+            &[&token, &expires_at, &user_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Look up a user by their email-confirmation token.
+pub async fn get_user_by_confirmation_token(
+    pool: &Pool,
+    token: &str,
+) -> Result<User, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT id, email, username, password_hash, is_active, created_at, updated_at,
+                    confirmation_token, confirmation_token_expires_at
+             FROM users WHERE confirmation_token = $1",
+            &[&token],
+        )
+        .await?
+        .ok_or(AppError::InvalidToken)?;
+
+    Ok(row_to_user(&row))
+}
+
+/// Activate a user and clear their confirmation token columns.
+pub async fn activate_user(pool: &Pool, user_id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE users
+             SET is_active = TRUE,
+                 confirmation_token = NULL,
+                 confirmation_token_expires_at = NULL,
+                 updated_at = NOW()
+             WHERE id = $1",
+            &[&user_id],
+        )
+        .await?;
+    Ok(())
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn row_to_user(row: &tokio_postgres::Row) -> User {
@@ -151,5 +209,7 @@ fn row_to_user(row: &tokio_postgres::Row) -> User {
         is_active: row.get("is_active"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        confirmation_token: row.get("confirmation_token"),
+        confirmation_token_expires_at: row.get("confirmation_token_expires_at"),
     }
 }

@@ -99,6 +99,7 @@ mod handler_tests {
             jwt_secret: "test_secret".into(),
             jwt_ttl_hours: 1,
             reset_token_ttl_minutes: 30,
+            confirmation_token_ttl_minutes: 1440,
         })
     }
 
@@ -162,6 +163,7 @@ mod health_tests {
             jwt_secret: "test_secret".into(),
             jwt_ttl_hours: 1,
             reset_token_ttl_minutes: 30,
+            confirmation_token_ttl_minutes: 1440,
         })
     }
 

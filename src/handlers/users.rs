@@ -1,13 +1,14 @@
 use crate::{
     db,
     errors::AppError,
-    models::{CreateUserRequest, UserResponse},
-    utils::password::{hash_password, validate_password},
+    models::CreateUserRequest,
+    utils::password::{generate_secure_token, hash_password, validate_password},
     AppState,
 };
 use actix_web::{post, web, HttpResponse};
+use chrono::{Duration, Utc};
 
-/// `POST /users` — Create a new user account.
+/// `POST /users` — Create a new (inactive) user account and return a confirmation token.
 #[post("/users")]
 pub async fn create_user(
     state: web::Data<AppState>,
@@ -24,7 +25,13 @@ pub async fn create_user(
 
     let hash = hash_password(&body.password)?;
     let user = db::create_user(&state.pool, &body.email, &body.username, &hash).await?;
-    let response: UserResponse = user.into();
 
-    Ok(HttpResponse::Created().json(response))
+    let token = generate_secure_token();
+    let expires_at = Utc::now() + Duration::minutes(state.confirmation_token_ttl_minutes);
+    db::set_confirmation_token(&state.pool, user.id, &token, expires_at).await?;
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "message": "Account created. Use the confirmation token to activate your account.",
+        "confirmation_token": token
+    })))
 }

@@ -21,6 +21,8 @@ pub struct AppState {
     pub jwt_ttl_hours: i64,
     /// Lifetime of a password-reset token in minutes.
     pub reset_token_ttl_minutes: i64,
+    /// Lifetime of an email-confirmation token in minutes.
+    pub confirmation_token_ttl_minutes: i64,
 }
 
 #[actix_web::main]
@@ -40,6 +42,10 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| "30".into())
         .parse()
         .expect("RESET_TOKEN_TTL_MINUTES must be an integer");
+    let confirmation_token_ttl_minutes: i64 = env::var("CONFIRMATION_TOKEN_TTL_MINUTES")
+        .unwrap_or_else(|_| "1440".into())
+        .parse()
+        .expect("CONFIRMATION_TOKEN_TTL_MINUTES must be an integer");
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let port: u16 = env::var("PORT")
         .unwrap_or_else(|_| "8081".into())
@@ -58,6 +64,7 @@ async fn main() -> std::io::Result<()> {
         jwt_secret,
         jwt_ttl_hours,
         reset_token_ttl_minutes,
+        confirmation_token_ttl_minutes,
     });
 
     log::info!("Starting server on {}:{}", host, port);
@@ -71,6 +78,7 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::auth::change_password)
             .service(handlers::auth::request_password_reset)
             .service(handlers::auth::confirm_password_reset)
+            .service(handlers::auth::confirm_email)
             .service(handlers::health::health)
             .service(handlers::docs::openapi_spec)
             .service(handlers::docs::openapi_spec_json)

@@ -13,6 +13,10 @@ pub struct User {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing)]
+    pub confirmation_token: Option<String>,
+    #[serde(skip_serializing)]
+    pub confirmation_token_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Public view of a user (no sensitive fields).
@@ -72,6 +76,12 @@ pub struct ChangePasswordRequest {
 #[derive(Debug, Deserialize)]
 pub struct PasswordResetRequest {
     pub email: String,
+}
+
+/// Request body for confirming an email address.
+#[derive(Debug, Deserialize)]
+pub struct ConfirmEmailRequest {
+    pub token: String,
 }
 
 /// Request body for completing a password reset.

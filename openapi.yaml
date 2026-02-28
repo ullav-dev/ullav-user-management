@@ -54,12 +54,15 @@ paths:
               username: alice
               password: s3cretP@ss
       responses:
-        '201':
-          description: User created
+        '200':
+          description: User created (inactive). Confirm email to activate the account.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UserResponse'
+                $ref: '#/components/schemas/CreateUserResponse'
+              example:
+                message: Account created. Use the confirmation token to activate your account.
+                confirmation_token: a3f1c2d4e5b6...
         '400':
           $ref: '#/components/responses/BadRequest'
         '409':
@@ -123,6 +126,37 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/confirm-email:
+    post:
+      summary: Confirm email address and activate account
+      description: |
+        Activates the user account associated with the confirmation token returned
+        by `POST /users`. Idempotent: calling it a second time after activation
+        returns 401 (token already cleared).
+      operationId: confirmEmail
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmEmailRequest'
+            example:
+              token: a3f1c2d4e5b6...
+      responses:
+        '204':
+          description: Account activated successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Token not found, already used, or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -248,6 +282,23 @@ components:
         new_password:
           type: string
           minLength: 8
+
+    CreateUserResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        confirmation_token:
+          type: string
+          description: 64-character hex token; use with /auth/confirm-email
+
+    ConfirmEmailRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: 64-character hex token from the registration response
 
     PasswordResetRequest:
       type: object

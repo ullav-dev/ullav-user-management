@@ -351,4 +351,4 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
           example:
-            error: database error: ...
+            error: 'database error: ...'

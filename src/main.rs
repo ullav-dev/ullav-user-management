@@ -73,6 +73,7 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::auth::confirm_password_reset)
             .service(handlers::health::health)
             .service(handlers::docs::openapi_spec)
+            .service(handlers::docs::openapi_spec_json)
             .service(handlers::docs::swagger_ui)
     })
     .bind((host.as_str(), port))?

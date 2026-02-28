@@ -14,6 +14,7 @@ tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4"
 deadpool-postgres = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 rust-argon2 = "3"
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -6,12 +6,12 @@ use crate::{
         PasswordResetConfirm, PasswordResetRequest,
     },
     utils::{
-        jwt::create_jwt,
+        jwt::{create_jwt, decode_jwt, Claims},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
     AppState,
 };
-use actix_web::{post, put, web, HttpResponse};
+use actix_web::{post, put, web, HttpMessage, HttpRequest, HttpResponse};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -32,31 +32,66 @@ pub async fn login(
         return Err(AppError::InvalidCredentials);
     }
 
-    let token = create_jwt(user.id, &state.jwt_secret, state.jwt_ttl_hours)?;
+    let (roles, permissions) =
+        db::get_user_roles_and_permissions(&state.pool, user.id).await?;
+    let token = create_jwt(
+        user.id,
+        &state.jwt_secret,
+        state.jwt_ttl_hours,
+        roles.clone(),
+        permissions.clone(),
+    )?;
     let response = LoginResponse {
         token,
         user: user.into(),
+        roles,
+        permissions,
     };
 
     Ok(HttpResponse::Ok().json(response))
 }
 
-/// `PUT /users/{id}/password` — Change a user's password (authenticated).
+/// `PUT /users/{id}/password` — Change a user's password.
+///
+/// Requires a valid JWT (injected by `AuthMiddleware`). The caller must either
+/// be the owner of the account (`claims.sub == user_id`) or hold the
+/// `users:change_any_password` permission. Admins may omit `current_password`;
+/// owners must supply it.
 #[put("/users/{id}/password")]
 pub async fn change_password(
     state: web::Data<AppState>,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AppError> {
     let user_id = path.into_inner();
 
+    let claims = req
+        .extensions()
+        .get::<Claims>()
+        .ok_or(AppError::InvalidToken)?
+        .clone();
+
+    let is_own = claims.sub == user_id.to_string();
+    let is_admin = claims.permissions.contains(&"users:change_any_password".to_string());
+
+    if !is_own && !is_admin {
+        return Err(AppError::Forbidden);
+    }
+
     validate_password(&body.new_password)?;
 
     let user = db::get_user_by_id(&state.pool, user_id).await?;
 
-    let valid = verify_password(&body.current_password, &user.password_hash)?;
-    if !valid {
-        return Err(AppError::InvalidCredentials);
+    if is_own {
+        let current = body
+            .current_password
+            .as_deref()
+            .ok_or_else(|| AppError::Validation("current_password is required".into()))?;
+        let valid = verify_password(current, &user.password_hash)?;
+        if !valid {
+            return Err(AppError::InvalidCredentials);
+        }
     }
 
     let new_hash = hash_password(&body.new_password)?;
@@ -136,4 +171,20 @@ pub async fn confirm_password_reset(
     db::consume_reset_token(&state.pool, &body.token).await?;
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// Extract and decode a JWT from the `Authorization: Bearer <token>` header.
+///
+/// Used by handlers that need to inspect claims but are not covered by middleware.
+#[allow(dead_code)]
+pub fn extract_claims(req: &HttpRequest, secret: &str) -> Result<Claims, AppError> {
+    let header = req
+        .headers()
+        .get(actix_web::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(AppError::InvalidToken)?;
+    let token = header
+        .strip_prefix("Bearer ")
+        .ok_or(AppError::InvalidToken)?;
+    decode_jwt(token, secret)
 }

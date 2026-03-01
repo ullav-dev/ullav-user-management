@@ -7,6 +7,7 @@ use tokio_postgres::NoTls;
 mod db;
 mod errors;
 mod handlers;
+mod middleware;
 mod models;
 mod utils;
 #[cfg(test)]
@@ -61,7 +62,7 @@ async fn main() -> std::io::Result<()> {
 
     let state = web::Data::new(AppState {
         pool,
-        jwt_secret,
+        jwt_secret: jwt_secret.clone(),
         jwt_ttl_hours,
         reset_token_ttl_minutes,
         confirmation_token_ttl_minutes,
@@ -73,16 +74,30 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(state.clone())
             .wrap(Logger::default())
+            // Open routes — no authentication required
             .service(handlers::users::create_user)
             .service(handlers::auth::login)
-            .service(handlers::auth::change_password)
+            .service(handlers::auth::confirm_email)
             .service(handlers::auth::request_password_reset)
             .service(handlers::auth::confirm_password_reset)
-            .service(handlers::auth::confirm_email)
-            .service(handlers::health::health)
             .service(handlers::docs::openapi_spec)
             .service(handlers::docs::openapi_spec_json)
             .service(handlers::docs::swagger_ui)
+            // JWT required — ownership/permission checked in handler
+            .service(
+                web::scope("")
+                    .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone()))
+                    .service(handlers::auth::change_password),
+            )
+            // Admin only — requires `health:read` permission
+            .service(
+                web::scope("")
+                    .wrap(middleware::auth::AuthMiddleware::require(
+                        jwt_secret.clone(),
+                        "health:read",
+                    ))
+                    .service(handlers::health::health),
+            )
     })
     .bind((host.as_str(), port))?
     .run()

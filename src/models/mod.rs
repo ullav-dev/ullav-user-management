@@ -63,12 +63,14 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub token: String,
     pub user: UserResponse,
+    pub roles: Vec<String>,
+    pub permissions: Vec<String>,
 }
 
 /// Request body for changing a user's own password.
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordRequest {
-    pub current_password: String,
+    pub current_password: Option<String>,
     pub new_password: String,
 }
 

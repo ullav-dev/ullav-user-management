@@ -198,6 +198,60 @@ pub async fn activate_user(pool: &Pool, user_id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Fetch all role names and permission names for a user.
+///
+/// Returns `(roles, permissions)` as sorted, deduplicated vecs.
+pub async fn get_user_roles_and_permissions(
+    pool: &Pool,
+    user_id: Uuid,
+) -> Result<(Vec<String>, Vec<String>), AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT r.name AS role_name, p.name AS permission_name
+             FROM user_roles ur
+             JOIN roles r ON r.id = ur.role_id
+             LEFT JOIN role_permissions rp ON rp.role_id = r.id
+             LEFT JOIN permissions p ON p.id = rp.permission_id
+             WHERE ur.user_id = $1",
+            &[&user_id],
+        )
+        .await?;
+
+    let mut roles = std::collections::HashSet::new();
+    let mut permissions = std::collections::HashSet::new();
+
+    for row in &rows {
+        let role_name: String = row.get("role_name");
+        let permission_name: Option<String> = row.get("permission_name");
+        roles.insert(role_name);
+        if let Some(perm) = permission_name {
+            permissions.insert(perm);
+        }
+    }
+
+    let mut roles: Vec<String> = roles.into_iter().collect();
+    let mut permissions: Vec<String> = permissions.into_iter().collect();
+    roles.sort();
+    permissions.sort();
+
+    Ok((roles, permissions))
+}
+
+/// Assign a named role to a user (no-op if already assigned).
+pub async fn assign_role(pool: &Pool, user_id: Uuid, role_name: &str) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO user_roles (user_id, role_id)
+             SELECT $1, id FROM roles WHERE name = $2
+             ON CONFLICT DO NOTHING",
+            &[&user_id, &role_name],
+        )
+        .await?;
+    Ok(())
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn row_to_user(row: &tokio_postgres::Row) -> User {

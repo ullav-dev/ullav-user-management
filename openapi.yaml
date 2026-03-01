@@ -18,6 +18,8 @@ paths:
       summary: Health check
       operationId: health
       tags: [System]
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Service and database are healthy
@@ -28,6 +30,10 @@ paths:
               example:
                 status: ok
                 database: ok
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '503':
           description: Database is unreachable or degraded
           content:
@@ -75,6 +81,8 @@ paths:
       summary: Change a user's password
       operationId: changePassword
       tags: [Users]
+      security:
+        - bearerAuth: []
       parameters:
         - name: id
           in: path
@@ -96,6 +104,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -229,6 +239,12 @@ paths:
           $ref: '#/components/responses/InternalError'
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
   schemas:
     HealthResponse:
       type: object
@@ -272,13 +288,24 @@ components:
           description: Signed HS256 JWT valid for `JWT_TTL_HOURS` hours
         user:
           $ref: '#/components/schemas/UserResponse'
+        roles:
+          type: array
+          items:
+            type: string
+          description: Role names assigned to the user
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Permission names granted via the user's roles
 
     ChangePasswordRequest:
       type: object
-      required: [current_password, new_password]
+      required: [new_password]
       properties:
         current_password:
           type: string
+          description: Required when the caller is changing their own password; omit when an admin changes another user's password
         new_password:
           type: string
           minLength: 8
@@ -394,6 +421,15 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             error: email or username already taken
+
+    Forbidden:
+      description: Caller lacks the required permission
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: insufficient permissions
 
     InternalError:
       description: Unexpected server error

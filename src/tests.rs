@@ -61,7 +61,7 @@ mod jwt_tests {
     fn test_create_and_decode_jwt() {
         let id = Uuid::new_v4();
         let secret = "test_secret_key_12345";
-        let token = create_jwt(id, secret, 1).expect("create_jwt should succeed");
+        let token = create_jwt(id, secret, 1, vec![], vec![]).expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
         assert_eq!(claims.sub, id.to_string());
     }
@@ -69,7 +69,7 @@ mod jwt_tests {
     #[test]
     fn test_jwt_wrong_secret_fails() {
         let id = Uuid::new_v4();
-        let token = create_jwt(id, "secret_a", 1).expect("create_jwt should succeed");
+        let token = create_jwt(id, "secret_a", 1, vec![], vec![]).expect("create_jwt should succeed");
         let result = decode_jwt(&token, "secret_b");
         assert!(result.is_err(), "decoding with wrong secret should fail");
     }

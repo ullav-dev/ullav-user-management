@@ -29,6 +29,7 @@ pub async fn create_user(
     let token = generate_secure_token();
     let expires_at = Utc::now() + Duration::minutes(state.confirmation_token_ttl_minutes);
     db::set_confirmation_token(&state.pool, user.id, &token, expires_at).await?;
+    db::assign_role(&state.pool, user.id, "user").await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "message": "Account created. Use the confirmation token to activate your account.",

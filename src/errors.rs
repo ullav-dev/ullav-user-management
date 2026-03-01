@@ -29,6 +29,9 @@ pub enum AppError {
 
     #[error("validation error: {0}")]
     Validation(String),
+
+    #[error("insufficient permissions")]
+    Forbidden,
 }
 
 impl actix_web::ResponseError for AppError {
@@ -40,6 +43,7 @@ impl actix_web::ResponseError for AppError {
             AppError::InvalidCredentials => StatusCode::UNAUTHORIZED,
             AppError::InvalidToken => StatusCode::UNAUTHORIZED,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
+            AppError::Forbidden => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

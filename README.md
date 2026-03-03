@@ -3,7 +3,7 @@
 A user management microservice built in Rust that provides:
 
 - **User account creation** — register with email, username, and password; assigned the `user` role automatically.
-- **Email confirmation** — account is inactive until the confirmation token is verified.
+- **Email confirmation** — account is inactive until the confirmation token is verified; a confirmation email is sent automatically when SMTP is configured.
 - **Authentication** — log in and receive a signed JWT carrying roles and permissions.
 - **Role-based access control** — middleware enforces JWT validity and permission checks on protected routes.
 - **Password management** — users change their own password; admins can change any user's password.
@@ -24,6 +24,7 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 | Password hash  | `rust-argon2` (Argon2id) |
 | JWT            | `jsonwebtoken 10`        |
 | Serialisation  | `serde` / `serde_json`   |
+| Email          | `lettre 0.11` (SMTP)     |
 
 ---
 
@@ -33,7 +34,8 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 |--------|------|------|-------------|
 | `POST` | `/users` | — | Create a new user account |
 | `POST` | `/auth/login` | — | Authenticate and receive a JWT |
-| `POST` | `/auth/confirm-email` | — | Activate account with confirmation token |
+| `POST` | `/auth/confirm-email` | — | Activate account with confirmation token (JSON body) |
+| `GET`  | `/auth/confirm-email?token=…` | — | Activate account via link click |
 | `POST` | `/auth/password-reset/request` | — | Request a password-reset token |
 | `POST` | `/auth/password-reset/confirm` | — | Complete a password reset |
 | `PUT`  | `/users/{id}/password` | Bearer JWT | Change a user's password |
@@ -43,7 +45,7 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 
 ### POST /users
 
-Creates an inactive account and returns a confirmation token.
+Creates an inactive account. If SMTP is configured, a confirmation email is sent to the provided address containing a clickable activation link. The confirmation token is also returned in the response body (useful when SMTP is not configured).
 
 ```json
 {
@@ -66,11 +68,19 @@ Returns `200 OK`:
 
 ### POST /auth/confirm-email
 
-Activates the account. The token comes from `POST /users`.
+Activates the account. The token comes from the confirmation email (or the `POST /users` response body when SMTP is not configured).
 
 ```json
 { "token": "<confirmation-token>" }
 ```
+
+Returns `204 No Content`.
+
+---
+
+### GET /auth/confirm-email?token=…
+
+Same as `POST /auth/confirm-email` but accepts the token as a query parameter. This is the endpoint linked to in the confirmation email — email clients fire a GET request when the user clicks the link.
 
 Returns `204 No Content`.
 
@@ -241,6 +251,31 @@ All configuration is via environment variables (or a `.env` file):
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8081` | Listen port |
 | `RUST_LOG` | `info` | Log level |
+| `SMTP_HOST` | — | SMTP server hostname; omit to disable email sending |
+| `SMTP_PORT` | `587` | SMTP server port |
+| `SMTP_USERNAME` | — | SMTP authentication username (optional) |
+| `SMTP_PASSWORD` | — | SMTP authentication password (optional) |
+| `SMTP_FROM` | — | From address for outgoing emails |
+| `APP_BASE_URL` | — | Base URL used to build confirmation links (e.g. `http://localhost:8081`) |
+| `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for MailHog) |
+
+#### Local email testing with MailHog
+
+```bash
+docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog
+```
+
+Then set in `.env`:
+
+```
+SMTP_HOST=localhost
+SMTP_PORT=1025
+SMTP_NO_TLS=true
+SMTP_FROM=test@example.com
+APP_BASE_URL=http://localhost:8081
+```
+
+Emails are visible at `http://localhost:8025`.
 
 ---
 

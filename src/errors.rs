@@ -32,6 +32,9 @@ pub enum AppError {
 
     #[error("insufficient permissions")]
     Forbidden,
+
+    #[error("email error: {0}")]
+    Email(String),
 }
 
 impl actix_web::ResponseError for AppError {

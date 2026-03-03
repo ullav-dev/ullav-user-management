@@ -140,6 +140,33 @@ paths:
           $ref: '#/components/responses/InternalError'
 
   /auth/confirm-email:
+    get:
+      summary: Confirm email address via link click
+      description: |
+        Activates the user account associated with the confirmation token. Intended
+        for use by email clients that fire a GET request when the user clicks the
+        confirmation link. Idempotent: calling it a second time returns 401 (token
+        already cleared after first activation).
+      operationId: confirmEmailGet
+      tags: [Auth]
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 64-character hex confirmation token from the registration email
+      responses:
+        '204':
+          description: Account activated successfully
+        '401':
+          description: Token not found, already used, or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
     post:
       summary: Confirm email address and activate account
       description: |

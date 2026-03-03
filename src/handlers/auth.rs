@@ -11,8 +11,9 @@ use crate::{
     },
     AppState,
 };
-use actix_web::{post, put, web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{get, post, put, web, HttpMessage, HttpRequest, HttpResponse};
 use chrono::Utc;
+use deadpool_postgres::Pool;
 use uuid::Uuid;
 
 /// `POST /auth/login` — Authenticate a user and return a JWT.
@@ -132,13 +133,9 @@ pub async fn request_password_reset(
     })))
 }
 
-/// `POST /auth/confirm-email` — Activate a user account using an email confirmation token.
-#[post("/auth/confirm-email")]
-pub async fn confirm_email(
-    state: web::Data<AppState>,
-    body: web::Json<ConfirmEmailRequest>,
-) -> Result<HttpResponse, AppError> {
-    let user = db::get_user_by_confirmation_token(&state.pool, &body.token).await?;
+/// Shared token-validation logic for both POST and GET confirm-email handlers.
+async fn activate_by_token(pool: &Pool, token: &str) -> Result<HttpResponse, AppError> {
+    let user = db::get_user_by_confirmation_token(pool, token).await?;
 
     let expires_at = user.confirmation_token_expires_at.ok_or(AppError::InvalidToken)?;
     if expires_at < Utc::now() {
@@ -146,10 +143,36 @@ pub async fn confirm_email(
     }
 
     if !user.is_active {
-        db::activate_user(&state.pool, user.id).await?;
+        db::activate_user(pool, user.id).await?;
     }
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /auth/confirm-email` — Activate a user account using an email confirmation token.
+#[post("/auth/confirm-email")]
+pub async fn confirm_email(
+    state: web::Data<AppState>,
+    body: web::Json<ConfirmEmailRequest>,
+) -> Result<HttpResponse, AppError> {
+    activate_by_token(&state.pool, &body.token).await
+}
+
+/// `GET /auth/confirm-email?token=…` — Activate a user account via a link click.
+///
+/// Email clients fire GET requests when users click links, so this mirrors the
+/// POST endpoint but accepts the token as a query parameter.
+#[derive(serde::Deserialize)]
+struct ConfirmEmailQuery {
+    token: String,
+}
+
+#[get("/auth/confirm-email")]
+pub async fn confirm_email_get(
+    state: web::Data<AppState>,
+    query: web::Query<ConfirmEmailQuery>,
+) -> Result<HttpResponse, AppError> {
+    activate_by_token(&state.pool, &query.token).await
 }
 
 /// `POST /auth/password-reset/confirm` — Complete a password reset.

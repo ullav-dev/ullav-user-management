@@ -60,11 +60,12 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/errors.rs` — `AppError` enum; implements `actix_web::ResponseError` to map errors to HTTP status codes
 - `src/db/mod.rs` — all raw SQL queries (no ORM); returns `AppError` on failure
 - `src/handlers/users.rs` — `POST /users` (open; assigns `user` role on creation)
-- `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm`, `POST /auth/confirm-email`
+- `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm`, `POST /auth/confirm-email`, `GET /auth/confirm-email` (link-click activation)
 - `src/handlers/health.rs` — `GET /health` (admin-only; requires `health:read` permission)
 - `src/handlers/docs.rs` — `GET /openapi.yaml` (spec embedded via `include_str!`), `GET /docs` (Swagger UI via CDN)
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
 - `src/utils/jwt.rs` — `create_jwt` / `decode_jwt` using HS256; `Claims` carries `sub`, `iat`, `exp`, `roles`, `permissions`
+- `src/utils/email.rs` — `build_mailer` (STARTTLS or no-TLS), `send_confirmation_email` (HTML email via lettre)
 - `src/utils/password.rs` — Argon2id hashing, verification, validation, and secure token generation
 - `src/tests.rs` — unit tests for password utils and JWT helpers; handler smoke tests using `actix_web::test` (no real DB needed)
 
@@ -78,4 +79,4 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 
 ## Configuration
 
-All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440). See `.env.example` for all variables and defaults.
+All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env.example` for all variables and defaults.

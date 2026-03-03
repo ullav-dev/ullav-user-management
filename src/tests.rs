@@ -100,6 +100,9 @@ mod handler_tests {
             jwt_ttl_hours: 1,
             reset_token_ttl_minutes: 30,
             confirmation_token_ttl_minutes: 1440,
+            mailer: None,
+            smtp_from: String::new(),
+            app_base_url: String::new(),
         })
     }
 
@@ -164,6 +167,9 @@ mod health_tests {
             jwt_ttl_hours: 1,
             reset_token_ttl_minutes: 30,
             confirmation_token_ttl_minutes: 1440,
+            mailer: None,
+            smtp_from: String::new(),
+            app_base_url: String::new(),
         })
     }
 

@@ -2,7 +2,10 @@ use crate::{
     db,
     errors::AppError,
     models::CreateUserRequest,
-    utils::password::{generate_secure_token, hash_password, validate_password},
+    utils::{
+        email::send_confirmation_email,
+        password::{generate_secure_token, hash_password, validate_password},
+    },
     AppState,
 };
 use actix_web::{post, web, HttpResponse};
@@ -30,6 +33,20 @@ pub async fn create_user(
     let expires_at = Utc::now() + Duration::minutes(state.confirmation_token_ttl_minutes);
     db::set_confirmation_token(&state.pool, user.id, &token, expires_at).await?;
     db::assign_role(&state.pool, user.id, "user").await?;
+
+    if let Some(mailer) = &state.mailer {
+        if let Err(e) = send_confirmation_email(
+            mailer,
+            &state.smtp_from,
+            &body.email,
+            &state.app_base_url,
+            &token,
+        )
+        .await
+        {
+            log::error!("Failed to send confirmation email to {}: {}", body.email, e);
+        }
+    }
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "message": "Account created. Use the confirmation token to activate your account.",

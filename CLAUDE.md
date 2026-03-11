@@ -79,4 +79,16 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 
 ## Configuration
 
-All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env.example` for all variables and defaults.
+All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env` for all variables and defaults.
+
+## Admin seed (`src/seed.rs`)
+
+On every startup, `seed::seed_admin` runs before the HTTP server binds. It reads:
+
+| Variable | Default |
+|---|---|
+| `ADMIN_USERNAME` | `theboss` |
+| `ADMIN_PASSWORD` | `changeme` |
+| `ADMIN_EMAIL` | `admin@localhost` |
+
+If no user with that username/email exists, it inserts one with `is_active = TRUE` (bypassing email confirmation) and assigns the `admin` role. The operation is idempotent — if the user already exists the seed logs a message and returns `Ok`. Changing the env vars after first run has no effect until the existing account is deleted from the database.

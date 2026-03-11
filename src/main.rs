@@ -10,6 +10,7 @@ mod errors;
 mod handlers;
 mod middleware;
 mod models;
+mod seed;
 mod utils;
 #[cfg(test)]
 mod tests;
@@ -89,12 +90,22 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
+    // Admin seed — credentials configurable via env vars.
+    let admin_username = env::var("ADMIN_USERNAME").unwrap_or_else(|_| "theboss".into());
+    let admin_password = env::var("ADMIN_PASSWORD").unwrap_or_else(|_| "changeme".into());
+    let admin_email    = env::var("ADMIN_EMAIL").unwrap_or_else(|_| "admin@localhost".into());
+
     // Build the connection pool.
     let mut cfg = PoolConfig::new();
     cfg.url = Some(database_url);
     let pool = cfg
         .create_pool(Some(Runtime::Tokio1), NoTls)
         .expect("failed to create database pool");
+
+    // Seed admin user (idempotent — no-op if already exists).
+    if let Err(e) = seed::seed_admin(&pool, &admin_username, &admin_email, &admin_password).await {
+        log::error!("Failed to seed admin user: {}", e);
+    }
 
     let state = web::Data::new(AppState {
         pool,

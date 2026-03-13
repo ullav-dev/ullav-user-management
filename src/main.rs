@@ -2,7 +2,7 @@ use actix_web::{middleware::Logger, web, App, HttpServer};
 use deadpool_postgres::{Config as PoolConfig, Runtime};
 use dotenv::dotenv;
 use lettre::{AsyncSmtpTransport, Tokio1Executor};
-use std::{env, net::IpAddr};
+use std::{collections::HashSet, env, net::IpAddr, sync::Arc};
 use tokio_postgres::NoTls;
 
 mod db;
@@ -72,6 +72,46 @@ async fn main() -> std::io::Result<()> {
         https_whitelist.len()
     );
 
+    // Geo-blocking — optional; requires GEOBLOCK (country codes) + GEOIP_DB (path to .mmdb).
+    let geoblock_countries: Arc<HashSet<String>> = Arc::new(
+        env::var("GEOBLOCK")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    );
+    let geoip_reader: Option<Arc<maxminddb::Reader<Vec<u8>>>> = if geoblock_countries.is_empty() {
+        None
+    } else {
+        match env::var("GEOIP_DB") {
+            Ok(path) => {
+                match std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| maxminddb::Reader::from_source(b).map_err(|e| e.to_string()))
+                {
+                    Ok(reader) => {
+                        log::info!(
+                            "GeoIP database loaded from {} — blocking {} country code(s): {:?}",
+                            path,
+                            geoblock_countries.len(),
+                            geoblock_countries,
+                        );
+                        Some(Arc::new(reader))
+                    }
+                    Err(e) => {
+                        log::error!("Failed to load GeoIP database from {}: {}", path, e);
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                log::warn!("GEOBLOCK is set but GEOIP_DB is not configured — geo-blocking disabled");
+                None
+            }
+        }
+    };
+
     // SMTP configuration — all optional; email is disabled if SMTP_HOST is absent.
     let smtp_host = env::var("SMTP_HOST").ok();
     let smtp_port: u16 = env::var("SMTP_PORT")
@@ -138,6 +178,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(state.clone())
             .wrap(Logger::default())
             .wrap(middleware::https::HttpsOnly::new(&https_whitelist))
+            .wrap(middleware::geo::GeoBlock::new(
+                geoip_reader.clone(),
+                geoblock_countries.clone(),
+            ))
             // Open routes — no authentication required
             .service(handlers::users::create_user)
             .service(handlers::auth::login)

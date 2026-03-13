@@ -65,6 +65,7 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/handlers/docs.rs` — `GET /openapi.yaml`, `GET /openapi.json` (YAML spec embedded via `include_str!`, converted to JSON with `serde_yaml`), `GET /docs` (Swagger UI via CDN); all three disabled when `ENABLE_DOCS=false`
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
 - `src/middleware/https.rs` — `HttpsOnly`: rejects non-HTTPS requests; localhost and `WHITELIST` IPs are exempt; uses `X-Forwarded-Proto` for proxy-terminated TLS
+- `src/middleware/geo.rs` — `GeoBlock`: denies requests from IPs in blocked countries using a MaxMind GeoLite2 `.mmdb` database (`GEOBLOCK` + `GEOIP_DB` env vars); no-op when not configured
 - `src/utils/jwt.rs` — `create_jwt` / `decode_jwt` using HS256; `Claims` carries `sub`, `iat`, `exp`, `roles`, `permissions`
 - `src/seed.rs` — `seed_admin`: runs at startup, idempotently inserts the admin user (active, admin role) using `ADMIN_USERNAME/EMAIL/PASSWORD` env vars
 - `src/utils/email.rs` — `build_mailer` (STARTTLS or no-TLS), `send_confirmation_email`, `send_password_reset_email` (HTML emails via lettre)
@@ -81,7 +82,7 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 
 ## Configuration
 
-All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440), `ENABLE_DOCS` (default `true` — set `false` in production to disable `/openapi.yaml`, `/openapi.json`, `/docs`), `WHITELIST` (comma-separated IPs allowed to use plain HTTP in addition to localhost). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env.example` for all variables and defaults.
+All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440), `ENABLE_DOCS` (default `true` — set `false` in production to disable `/openapi.yaml`, `/openapi.json`, `/docs`), `WHITELIST` (comma-separated IPs allowed to use plain HTTP in addition to localhost), `GEOBLOCK` (comma-separated ISO 3166-1 alpha-2 country codes to deny — requires `GEOIP_DB`), `GEOIP_DB` (path to a MaxMind GeoLite2-Country or GeoIP2-Country `.mmdb` file). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env.example` for all variables and defaults.
 
 ## Admin seed (`src/seed.rs`)
 

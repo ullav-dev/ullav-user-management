@@ -9,6 +9,7 @@ A user management microservice built in Rust that provides:
 - **Password management** — users change their own password; admins can change any user's password.
 - **Password reset** — request and confirm a secure password-reset token; a reset link is emailed automatically when SMTP is configured.
 - **HTTPS enforcement** — non-HTTPS requests are rejected with `403` unless the client IP is localhost or listed in `WHITELIST`; proxy-terminated TLS is detected via `X-Forwarded-Proto`.
+- **Geo-blocking** — requests from IPs in blocked countries are denied with `403`; configured via `GEOBLOCK` (ISO country codes) and `GEOIP_DB` (MaxMind `.mmdb` file).
 
 Data is persisted in **PostgreSQL** using native SQL (no ORM).
 
@@ -272,6 +273,8 @@ All configuration is via environment variables (or a `.env` file):
 | `ADMIN_PASSWORD` | `changeme` | Seeded admin password |
 | `ENABLE_DOCS` | `true` | Set `false` in production to disable `/openapi.yaml`, `/openapi.json`, and `/docs` |
 | `WHITELIST` | — | Comma-separated IPs allowed to use plain HTTP (e.g. `10.0.0.1,10.0.0.2`); `127.0.0.1` and `::1` are always allowed |
+| `GEOBLOCK` | — | Comma-separated ISO 3166-1 alpha-2 country codes to deny (e.g. `CN,RU,KP`); requires `GEOIP_DB` |
+| `GEOIP_DB` | — | Path to a MaxMind GeoLite2-Country or GeoIP2-Country `.mmdb` file |
 | `SMTP_HOST` | — | SMTP server hostname; omit to disable email sending |
 | `SMTP_PORT` | `587` | SMTP server port |
 | `SMTP_USERNAME` | — | SMTP authentication username (optional) |
@@ -279,6 +282,19 @@ All configuration is via environment variables (or a `.env` file):
 | `SMTP_FROM` | — | From address for outgoing emails |
 | `APP_BASE_URL` | — | Base URL used to build confirmation links (e.g. `http://localhost:8081`) |
 | `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for MailHog) |
+
+#### Geo-blocking setup
+
+Download the free [GeoLite2-Country database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) (requires a free MaxMind account), then set:
+
+```
+GEOIP_DB=/etc/geoip/GeoLite2-Country.mmdb
+GEOBLOCK=CN,RU,KP
+```
+
+If `GEOBLOCK` is empty or `GEOIP_DB` is not set, geo-blocking is silently disabled. Invalid or private IP addresses that have no GeoIP entry are always allowed through.
+
+---
 
 #### Local email testing with MailHog
 

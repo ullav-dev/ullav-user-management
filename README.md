@@ -7,7 +7,7 @@ A user management microservice built in Rust that provides:
 - **Authentication** — log in and receive a signed JWT carrying roles and permissions.
 - **Role-based access control** — middleware enforces JWT validity and permission checks on protected routes.
 - **Password management** — users change their own password; admins can change any user's password.
-- **Password reset** — request and confirm a secure password-reset token.
+- **Password reset** — request and confirm a secure password-reset token; a reset link is emailed automatically when SMTP is configured.
 
 Data is persisted in **PostgreSQL** using native SQL (no ORM).
 
@@ -132,7 +132,7 @@ Returns `204 No Content`. Returns `401` if the token is missing/invalid, `403` i
 { "email": "alice@example.com" }
 ```
 
-Returns `200 OK`. Always succeeds to prevent user enumeration. The reset token is included in the response body (in production it would be sent by email).
+Returns `200 OK`. Always succeeds to prevent user enumeration. If SMTP is configured, a password-reset email is sent to the address containing a clickable link. When SMTP is not configured, the reset token is logged to stdout instead.
 
 ---
 
@@ -237,6 +237,20 @@ TEST_DATABASE_URL=postgresql://app_user:app_password@localhost:5433/user_managem
 
 ---
 
+## Admin user seed
+
+On every startup, before the HTTP server binds, the service idempotently ensures an admin user exists. If no user with the configured username or email is found, one is inserted with `is_active = true` (bypassing email confirmation) and assigned the `admin` role.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ADMIN_USERNAME` | `theboss` | Admin account username |
+| `ADMIN_EMAIL` | `admin@localhost` | Admin account email |
+| `ADMIN_PASSWORD` | `changeme` | Admin account password — **change in production** |
+
+Changing these env vars after first run has no effect until the existing account is deleted from the database.
+
+---
+
 ## Configuration
 
 All configuration is via environment variables (or a `.env` file):
@@ -251,6 +265,9 @@ All configuration is via environment variables (or a `.env` file):
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8081` | Listen port |
 | `RUST_LOG` | `info` | Log level |
+| `ADMIN_USERNAME` | `theboss` | Seeded admin username |
+| `ADMIN_EMAIL` | `admin@localhost` | Seeded admin email |
+| `ADMIN_PASSWORD` | `changeme` | Seeded admin password |
 | `SMTP_HOST` | — | SMTP server hostname; omit to disable email sending |
 | `SMTP_PORT` | `587` | SMTP server port |
 | `SMTP_USERNAME` | — | SMTP authentication username (optional) |

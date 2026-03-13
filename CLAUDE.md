@@ -66,7 +66,8 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
 - `src/middleware/https.rs` — `HttpsOnly`: rejects non-HTTPS requests; localhost and `WHITELIST` IPs are exempt; uses `X-Forwarded-Proto` for proxy-terminated TLS
 - `src/middleware/geo.rs` — `GeoBlock`: denies requests from IPs in blocked countries using a MaxMind GeoLite2 `.mmdb` database (`GEOBLOCK` + `GEOIP_DB` env vars); no-op when not configured
-- `src/middleware/cors` — provided by `actix-cors`; configured via `CORS_ORIGINS` env var; outermost middleware so OPTIONS preflight is handled first
+
+Middleware is registered in this order (innermost → outermost, i.e. outermost is processed first): `Logger` → `HttpsOnly` → `GeoBlock` → `Cors` (from `actix-cors`). `Cors` is outermost so OPTIONS preflight requests are answered before any auth or geo checks. Configured via `CORS_ORIGINS` env var.
 - `src/utils/jwt.rs` — `create_jwt` / `decode_jwt` using HS256; `Claims` carries `sub`, `iat`, `exp`, `roles`, `permissions`
 - `src/seed.rs` — `seed_admin`: runs at startup, idempotently inserts the admin user (active, admin role) using `ADMIN_USERNAME/EMAIL/PASSWORD` env vars
 - `src/utils/email.rs` — `build_mailer` (STARTTLS or no-TLS), `send_confirmation_email`, `send_password_reset_email` (HTML emails via lettre)

@@ -28,6 +28,8 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 | JWT            | `jsonwebtoken 10`        |
 | Serialisation  | `serde` / `serde_json`   |
 | Email          | `lettre 0.11` (SMTP)     |
+| CORS           | `actix-cors 0.7`         |
+| Geo-blocking   | `maxminddb 0.27`         |
 
 ---
 

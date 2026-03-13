@@ -6,6 +6,7 @@ use crate::{
         PasswordResetConfirm, PasswordResetRequest,
     },
     utils::{
+        email::send_password_reset_email,
         jwt::{create_jwt, decode_jwt, Claims},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
@@ -116,16 +117,25 @@ pub async fn request_password_reset(
         db::create_reset_token(&state.pool, user.id, &token, state.reset_token_ttl_minutes)
             .await?;
 
-        // In production this token would be emailed to the user.
-        // Here we return it in the response body for integration purposes.
-        log::info!(
-            "Password reset token generated for user {} — token: {}",
-            user.id,
-            token
-        );
-
-        return Ok(HttpResponse::Ok()
-            .json(serde_json::json!({ "reset_token": token })));
+        if let Some(mailer) = &state.mailer {
+            if let Err(e) = send_password_reset_email(
+                mailer,
+                &state.smtp_from,
+                &body.email,
+                &state.app_base_url,
+                &token,
+            )
+            .await
+            {
+                log::error!("Failed to send password reset email to {}: {}", body.email, e);
+            }
+        } else {
+            log::info!(
+                "Password reset token generated for user {} — token: {}",
+                user.id,
+                token
+            );
+        }
     }
 
     Ok(HttpResponse::Ok().json(serde_json::json!({

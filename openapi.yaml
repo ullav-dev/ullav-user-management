@@ -5,8 +5,14 @@ info:
   description: |
     User account creation, authentication, and password management microservice.
 
-    Password-reset tokens are returned in the response body (in production they would be delivered by email).
-  version: 0.1.0
+    **Email flows:** Confirmation and password-reset tokens are delivered by email when SMTP is
+    configured (`SMTP_HOST`). When SMTP is not configured, password-reset tokens are logged to
+    stdout; the confirmation token is always returned in the `POST /users` response body regardless.
+
+    **Security:** All endpoints require HTTPS unless the client IP is localhost or whitelisted.
+    Requests from geo-blocked countries are rejected with `403`. CORS headers are emitted when
+    `CORS_ORIGINS` is configured.
+  version: 0.2.0
 
 servers:
   - url: http://localhost:8081
@@ -47,6 +53,10 @@ paths:
   /users:
     post:
       summary: Create a new user account
+      description: |
+        Creates an inactive account and returns a confirmation token. When SMTP is configured,
+        a confirmation email is also sent to the provided address. The account must be activated
+        via `POST /auth/confirm-email` or the link in the confirmation email before login is allowed.
       operationId: createUser
       tags: [Users]
       requestBody:
@@ -202,8 +212,9 @@ paths:
       summary: Request a password-reset token
       description: |
         Always returns `200 OK` regardless of whether the email exists, to prevent
-        user enumeration. If the email is registered the reset token is included in
-        the response body; otherwise a generic message is returned.
+        user enumeration. When SMTP is configured, a password-reset link is sent to
+        the address. When SMTP is not configured, the token is logged to stdout.
+        The token is never returned in the response body.
       operationId: requestPasswordReset
       tags: [Auth]
       requestBody:
@@ -220,18 +231,9 @@ paths:
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/PasswordResetTokenResponse'
-                  - $ref: '#/components/schemas/GenericMessageResponse'
-              examples:
-                email_found:
-                  summary: Email was registered
-                  value:
-                    reset_token: a3f1c2d4e5b6...
-                email_not_found:
-                  summary: Email was not registered
-                  value:
-                    message: If the email is registered you will receive a reset token
+                $ref: '#/components/schemas/GenericMessageResponse'
+              example:
+                message: If the email is registered you will receive a reset token
         '400':
           $ref: '#/components/responses/BadRequest'
         '500':
@@ -392,13 +394,6 @@ components:
         updated_at:
           type: string
           format: date-time
-
-    PasswordResetTokenResponse:
-      type: object
-      properties:
-        reset_token:
-          type: string
-          description: 64-character hex token; use with /auth/password-reset/confirm
 
     GenericMessageResponse:
       type: object

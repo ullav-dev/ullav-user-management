@@ -268,6 +268,7 @@ All configuration is via environment variables (or a `.env` file):
 | `ADMIN_USERNAME` | `theboss` | Seeded admin username |
 | `ADMIN_EMAIL` | `admin@localhost` | Seeded admin email |
 | `ADMIN_PASSWORD` | `changeme` | Seeded admin password |
+| `ENABLE_DOCS` | `true` | Set `false` in production to disable `/openapi.yaml`, `/openapi.json`, and `/docs` |
 | `SMTP_HOST` | — | SMTP server hostname; omit to disable email sending |
 | `SMTP_PORT` | `587` | SMTP server port |
 | `SMTP_USERNAME` | — | SMTP authentication username (optional) |

@@ -58,6 +58,10 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| "8081".into())
         .parse()
         .expect("PORT must be a number");
+    let enable_docs: bool = env::var("ENABLE_DOCS")
+        .unwrap_or_else(|_| "true".into())
+        .parse()
+        .unwrap_or(true);
 
     // SMTP configuration — all optional; email is disabled if SMTP_HOST is absent.
     let smtp_host = env::var("SMTP_HOST").ok();
@@ -121,7 +125,7 @@ async fn main() -> std::io::Result<()> {
     log::info!("Starting server on {}:{}", host, port);
 
     HttpServer::new(move || {
-        App::new()
+        let mut app = App::new()
             .app_data(state.clone())
             .wrap(Logger::default())
             // Open routes — no authentication required
@@ -130,10 +134,16 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::auth::confirm_email)
             .service(handlers::auth::confirm_email_get)
             .service(handlers::auth::request_password_reset)
-            .service(handlers::auth::confirm_password_reset)
-            .service(handlers::docs::openapi_spec)
-            .service(handlers::docs::openapi_spec_json)
-            .service(handlers::docs::swagger_ui)
+            .service(handlers::auth::confirm_password_reset);
+
+        if enable_docs {
+            app = app
+                .service(handlers::docs::openapi_spec)
+                .service(handlers::docs::openapi_spec_json)
+                .service(handlers::docs::swagger_ui);
+        }
+
+        app
             // JWT required — ownership/permission checked in handler
             .service(
                 web::scope("")

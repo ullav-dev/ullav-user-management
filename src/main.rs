@@ -2,7 +2,7 @@ use actix_web::{middleware::Logger, web, App, HttpServer};
 use deadpool_postgres::{Config as PoolConfig, Runtime};
 use dotenv::dotenv;
 use lettre::{AsyncSmtpTransport, Tokio1Executor};
-use std::env;
+use std::{env, net::IpAddr};
 use tokio_postgres::NoTls;
 
 mod db;
@@ -62,6 +62,15 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| "true".into())
         .parse()
         .unwrap_or(true);
+    let https_whitelist: Vec<IpAddr> = env::var("WHITELIST")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+        .collect();
+    log::info!(
+        "HTTPS enforcement enabled — {} additional whitelisted IP(s)",
+        https_whitelist.len()
+    );
 
     // SMTP configuration — all optional; email is disabled if SMTP_HOST is absent.
     let smtp_host = env::var("SMTP_HOST").ok();
@@ -128,6 +137,7 @@ async fn main() -> std::io::Result<()> {
         let mut app = App::new()
             .app_data(state.clone())
             .wrap(Logger::default())
+            .wrap(middleware::https::HttpsOnly::new(&https_whitelist))
             // Open routes — no authentication required
             .service(handlers::users::create_user)
             .service(handlers::auth::login)

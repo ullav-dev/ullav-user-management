@@ -64,6 +64,7 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/handlers/health.rs` — `GET /health` (admin-only; requires `health:read` permission)
 - `src/handlers/docs.rs` — `GET /openapi.yaml`, `GET /openapi.json` (YAML spec embedded via `include_str!`, converted to JSON with `serde_yaml`), `GET /docs` (Swagger UI via CDN); all three disabled when `ENABLE_DOCS=false`
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
+- `src/middleware/https.rs` — `HttpsOnly`: rejects non-HTTPS requests; localhost and `WHITELIST` IPs are exempt; uses `X-Forwarded-Proto` for proxy-terminated TLS
 - `src/utils/jwt.rs` — `create_jwt` / `decode_jwt` using HS256; `Claims` carries `sub`, `iat`, `exp`, `roles`, `permissions`
 - `src/seed.rs` — `seed_admin`: runs at startup, idempotently inserts the admin user (active, admin role) using `ADMIN_USERNAME/EMAIL/PASSWORD` env vars
 - `src/utils/email.rs` — `build_mailer` (STARTTLS or no-TLS), `send_confirmation_email`, `send_password_reset_email` (HTML emails via lettre)
@@ -80,7 +81,7 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 
 ## Configuration
 
-All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440), `ENABLE_DOCS` (default `true` — set `false` in production to disable `/openapi.yaml`, `/openapi.json`, `/docs`). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env.example` for all variables and defaults.
+All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440), `ENABLE_DOCS` (default `true` — set `false` in production to disable `/openapi.yaml`, `/openapi.json`, `/docs`), `WHITELIST` (comma-separated IPs allowed to use plain HTTP in addition to localhost). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env.example` for all variables and defaults.
 
 ## Admin seed (`src/seed.rs`)
 

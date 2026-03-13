@@ -8,6 +8,7 @@ A user management microservice built in Rust that provides:
 - **Role-based access control** — middleware enforces JWT validity and permission checks on protected routes.
 - **Password management** — users change their own password; admins can change any user's password.
 - **Password reset** — request and confirm a secure password-reset token; a reset link is emailed automatically when SMTP is configured.
+- **HTTPS enforcement** — non-HTTPS requests are rejected with `403` unless the client IP is localhost or listed in `WHITELIST`; proxy-terminated TLS is detected via `X-Forwarded-Proto`.
 
 Data is persisted in **PostgreSQL** using native SQL (no ORM).
 
@@ -270,6 +271,7 @@ All configuration is via environment variables (or a `.env` file):
 | `ADMIN_EMAIL` | `admin@localhost` | Seeded admin email |
 | `ADMIN_PASSWORD` | `changeme` | Seeded admin password |
 | `ENABLE_DOCS` | `true` | Set `false` in production to disable `/openapi.yaml`, `/openapi.json`, and `/docs` |
+| `WHITELIST` | — | Comma-separated IPs allowed to use plain HTTP (e.g. `10.0.0.1,10.0.0.2`); `127.0.0.1` and `::1` are always allowed |
 | `SMTP_HOST` | — | SMTP server hostname; omit to disable email sending |
 | `SMTP_PORT` | `587` | SMTP server port |
 | `SMTP_USERNAME` | — | SMTP authentication username (optional) |

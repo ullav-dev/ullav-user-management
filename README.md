@@ -40,7 +40,8 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 | `POST` | `/auth/password-reset/confirm` | — | Complete a password reset |
 | `PUT`  | `/users/{id}/password` | Bearer JWT | Change a user's password |
 | `GET`  | `/health` | Bearer JWT (`health:read`) | Service and database health check |
-| `GET`  | `/openapi.yaml` | — | OpenAPI spec |
+| `GET`  | `/openapi.yaml` | — | OpenAPI spec (YAML) |
+| `GET`  | `/openapi.json` | — | OpenAPI spec (JSON) |
 | `GET`  | `/docs` | — | Swagger UI |
 
 ### POST /users

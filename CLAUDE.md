@@ -62,7 +62,7 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/handlers/users.rs` — `POST /users` (open; assigns `user` role on creation)
 - `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm`, `POST /auth/confirm-email`, `GET /auth/confirm-email` (link-click activation)
 - `src/handlers/health.rs` — `GET /health` (admin-only; requires `health:read` permission)
-- `src/handlers/docs.rs` — `GET /openapi.yaml` (spec embedded via `include_str!`), `GET /docs` (Swagger UI via CDN)
+- `src/handlers/docs.rs` — `GET /openapi.yaml`, `GET /openapi.json` (YAML spec embedded via `include_str!`, converted to JSON with `serde_yaml`), `GET /docs` (Swagger UI via CDN); all three disabled when `ENABLE_DOCS=false`
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
 - `src/utils/jwt.rs` — `create_jwt` / `decode_jwt` using HS256; `Claims` carries `sub`, `iat`, `exp`, `roles`, `permissions`
 - `src/seed.rs` — `seed_admin`: runs at startup, idempotently inserts the admin user (active, admin role) using `ADMIN_USERNAME/EMAIL/PASSWORD` env vars

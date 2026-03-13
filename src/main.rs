@@ -1,4 +1,5 @@
-use actix_web::{middleware::Logger, web, App, HttpServer};
+use actix_cors::Cors;
+use actix_web::{http, middleware::Logger, web, App, HttpServer};
 use deadpool_postgres::{Config as PoolConfig, Runtime};
 use dotenv::dotenv;
 use lettre::{AsyncSmtpTransport, Tokio1Executor};
@@ -143,6 +144,21 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
+    // CORS — optional; set CORS_ORIGINS to "*" or a comma-separated list of allowed origins.
+    let cors_origins: Vec<String> = env::var("CORS_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if cors_origins.is_empty() {
+        log::info!("CORS_ORIGINS not set — CORS disabled");
+    } else if cors_origins == ["*"] {
+        log::info!("CORS enabled — any origin allowed");
+    } else {
+        log::info!("CORS enabled — {} allowed origin(s)", cors_origins.len());
+    }
+
     // Admin seed — credentials configurable via env vars.
     let admin_username = env::var("ADMIN_USERNAME").unwrap_or_else(|_| "theboss".into());
     let admin_password = env::var("ADMIN_PASSWORD").unwrap_or_else(|_| "changeme".into());
@@ -174,6 +190,27 @@ async fn main() -> std::io::Result<()> {
     log::info!("Starting server on {}:{}", host, port);
 
     HttpServer::new(move || {
+        // Build CORS middleware.
+        let cors = if cors_origins == ["*"] {
+            Cors::default()
+                .allow_any_origin()
+                .allowed_methods(["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+                .allowed_headers([http::header::AUTHORIZATION, http::header::CONTENT_TYPE, http::header::ACCEPT])
+                .max_age(3600)
+        } else if cors_origins.is_empty() {
+            Cors::default()
+        } else {
+            let mut c = Cors::default()
+                .allowed_methods(["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+                .allowed_headers([http::header::AUTHORIZATION, http::header::CONTENT_TYPE, http::header::ACCEPT])
+                .supports_credentials()
+                .max_age(3600);
+            for origin in &cors_origins {
+                c = c.allowed_origin(origin);
+            }
+            c
+        };
+
         let mut app = App::new()
             .app_data(state.clone())
             .wrap(Logger::default())
@@ -182,6 +219,7 @@ async fn main() -> std::io::Result<()> {
                 geoip_reader.clone(),
                 geoblock_countries.clone(),
             ))
+            .wrap(cors)
             // Open routes — no authentication required
             .service(handlers::users::create_user)
             .service(handlers::auth::login)

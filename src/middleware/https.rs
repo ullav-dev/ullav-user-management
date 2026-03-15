@@ -5,10 +5,19 @@ use actix_web::{
 };
 use std::{
     future::{ready, Future, Ready},
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     rc::Rc,
 };
+
+/// Parse an IP address string that may include a port suffix
+/// (`"192.0.2.1:1234"` or `"[::1]:1234"`).
+fn parse_ip(s: &str) -> Option<IpAddr> {
+    s.parse::<SocketAddr>()
+        .map(|a| a.ip())
+        .ok()
+        .or_else(|| s.parse::<IpAddr>().ok())
+}
 
 /// Middleware that rejects non-HTTPS requests unless the client IP is
 /// localhost (`127.0.0.1` / `::1`) or listed in the configured whitelist.
@@ -73,10 +82,15 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        // Resolve the scheme before consuming `req`; connection_info checks
-        // X-Forwarded-Proto / Forwarded headers set by a reverse proxy.
-        let scheme = req.connection_info().scheme().to_owned();
-        let peer_ip = req.peer_addr().map(|a| a.ip());
+        // Resolve scheme and real client IP before consuming `req`.
+        // connection_info checks X-Forwarded-Proto / X-Real-IP / X-Forwarded-For
+        // headers set by a reverse proxy before falling back to the socket address.
+        let conn = req.connection_info().clone();
+        let scheme = conn.scheme().to_owned();
+        let ip_str = conn
+            .realip_remote_addr()
+            .or_else(|| conn.peer_addr())
+            .map(str::to_owned);
         let allowed_ips = self.allowed_ips.clone();
         let service = Rc::clone(&self.service);
 
@@ -85,7 +99,11 @@ where
                 return service.call(req).await.map(ServiceResponse::map_into_left_body);
             }
 
-            let is_allowed = peer_ip.map_or(false, |ip| allowed_ips.contains(&ip));
+            let is_allowed = ip_str
+                .as_deref()
+                .and_then(parse_ip)
+                .map_or(false, |ip| allowed_ips.contains(&ip));
+
             if is_allowed {
                 return service.call(req).await.map(ServiceResponse::map_into_left_body);
             }

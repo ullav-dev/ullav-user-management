@@ -28,5 +28,5 @@ jobs:
           context: .
           push: true
           tags: |
-            hub.setanta.dev/dockerhosted-repo/${{ vars.NX_DOCKER_GITEA_USERNAME }}/setanta-ddns:${{ steps.commit.outputs.short }}
-            hub.setanta.dev/dockerhosted-repo/${{ vars.NX_DOCKER_GITEA_USERNAME }}/setanta-ddns:latest
+            hub.setanta.dev/dockerhosted-repo/${{ vars.NX_DOCKER_GITEA_USERNAME }}/ullav-user-management:${{ steps.commit.outputs.short }}
+            hub.setanta.dev/dockerhosted-repo/${{ vars.NX_DOCKER_GITEA_USERNAME }}/ullav-user-management:latest

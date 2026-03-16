@@ -8,10 +8,11 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - id: commit
-        uses: prompt/actions-commit-hash@v3
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Get commit hash
+        id: commit
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx

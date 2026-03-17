@@ -15,6 +15,7 @@ RUN rm -f target/release/deps/user_management*
 
 # Build the real binary
 COPY src ./src
+COPY openapi.yaml ./
 RUN cargo build --release
 
 # --- runtime stage ---

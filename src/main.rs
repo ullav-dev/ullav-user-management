@@ -6,6 +6,25 @@ use lettre::{AsyncSmtpTransport, Tokio1Executor};
 use std::{collections::HashSet, env, net::IpAddr, sync::Arc};
 use tokio_postgres::NoTls;
 
+/// Resolve a secret value, preferring the Docker-secrets `_FILE` convention.
+///
+/// If `{name}_FILE` is set, the file at that path is read and its contents
+/// trimmed (Docker writes a trailing newline). Falls back to the plain `{name}`
+/// env var. Returns `None` when neither is present.
+fn resolve_secret(name: &str) -> Option<String> {
+    let file_key = format!("{}_FILE", name);
+    if let Ok(path) = env::var(&file_key) {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => return Some(contents.trim().to_string()),
+            Err(e) => log::warn!(
+                "{} points to {:?} but the file could not be read: {} — falling back to {}",
+                file_key, path, e, name
+            ),
+        }
+    }
+    env::var(name).ok()
+}
+
 mod db;
 mod errors;
 mod handlers;
@@ -31,6 +50,9 @@ pub struct AppState {
     pub mailer: Option<AsyncSmtpTransport<Tokio1Executor>>,
     pub smtp_from: String,
     pub app_base_url: String,
+    /// Allowlist of caller-supplied `app_url` values accepted in request bodies.
+    /// Empty when `ALLOWED_APP_URLS` is not configured (single-tenant mode).
+    pub allowed_app_urls: Vec<String>,
 }
 
 #[actix_web::main]
@@ -40,8 +62,8 @@ async fn main() -> std::io::Result<()> {
 
     let database_url = env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set");
-    let jwt_secret = env::var("JWT_SECRET")
-        .expect("JWT_SECRET must be set");
+    let jwt_secret = resolve_secret("JWT_SECRET")
+        .expect("JWT_SECRET (or JWT_SECRET_FILE) must be set");
     let jwt_ttl_hours: i64 = env::var("JWT_TTL_HOURS")
         .unwrap_or_else(|_| "24".into())
         .parse()
@@ -120,9 +142,23 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .expect("SMTP_PORT must be a number");
     let smtp_username = env::var("SMTP_USERNAME").ok();
-    let smtp_password = env::var("SMTP_PASSWORD").ok();
+    let smtp_password = resolve_secret("SMTP_PASSWORD");
     let smtp_from = env::var("SMTP_FROM").unwrap_or_default();
     let app_base_url = env::var("APP_BASE_URL").unwrap_or_default();
+    let allowed_app_urls: Vec<String> = env::var("ALLOWED_APP_URLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if allowed_app_urls.is_empty() {
+        log::info!("ALLOWED_APP_URLS not set — app_url in requests ignored, using APP_BASE_URL");
+    } else {
+        log::info!(
+            "ALLOWED_APP_URLS configured — {} allowed URL(s)",
+            allowed_app_urls.len()
+        );
+    }
     let smtp_no_tls: bool = env::var("SMTP_NO_TLS")
         .unwrap_or_else(|_| "false".into())
         .parse()
@@ -161,7 +197,7 @@ async fn main() -> std::io::Result<()> {
 
     // Admin seed — credentials configurable via env vars.
     let admin_username = env::var("ADMIN_USERNAME").unwrap_or_else(|_| "theboss".into());
-    let admin_password = env::var("ADMIN_PASSWORD").unwrap_or_else(|_| "changeme".into());
+    let admin_password = resolve_secret("ADMIN_PASSWORD").unwrap_or_else(|| "changeme".into());
     let admin_email    = env::var("ADMIN_EMAIL").unwrap_or_else(|_| "admin@localhost".into());
 
     // Build the connection pool.
@@ -185,6 +221,7 @@ async fn main() -> std::io::Result<()> {
         mailer,
         smtp_from,
         app_base_url,
+        allowed_app_urls,
     });
 
     log::info!("Starting server on {}:{}", host, port);

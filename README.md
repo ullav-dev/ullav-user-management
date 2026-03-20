@@ -8,6 +8,8 @@ A user management microservice built in Rust that provides:
 - **Role-based access control** — middleware enforces JWT validity and permission checks on protected routes.
 - **Password management** — users change their own password; admins can change any user's password.
 - **Password reset** — request and confirm a secure password-reset token; a reset link is emailed automatically when SMTP is configured.
+- **Multi-tenant email links** — `POST /users` and `POST /auth/password-reset/request` accept an optional `app_url` field; the service validates it against an allowlist (`ALLOWED_APP_URLS`) and uses it as the base for confirmation and reset links, enabling one auth service to serve multiple front-end applications.
+- **Docker secrets** — `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a `_FILE` variant (e.g. `JWT_SECRET_FILE=/run/secrets/jwt_secret`) for use with Docker / Compose secrets.
 - **HTTPS enforcement** — non-HTTPS requests are rejected with `403` unless the client IP is localhost or listed in `WHITELIST`; proxy-terminated TLS is detected via `X-Forwarded-Proto`.
 - **Geo-blocking** — requests from IPs in blocked countries are denied with `403`; configured via `GEOBLOCK` (ISO country codes) and `GEOIP_DB` (MaxMind `.mmdb` file).
 - **CORS** — cross-origin resource sharing headers; configured via `CORS_ORIGINS` (`*` for any origin, or a comma-separated list of allowed origins).
@@ -53,11 +55,14 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 
 Creates an inactive account. If SMTP is configured, a confirmation email is sent to the provided address containing a clickable activation link. The confirmation token is also returned in the response body (useful when SMTP is not configured).
 
+The optional `app_url` field sets the base URL used to build the confirmation link in the email. It must be present in `ALLOWED_APP_URLS` when that variable is configured; omit it to use the server's default `APP_BASE_URL`.
+
 ```json
 {
   "email": "alice@example.com",
   "username": "alice",
-  "password": "s3cretP@ss"
+  "password": "s3cretP@ss",
+  "app_url": "https://app.example.com"
 }
 ```
 
@@ -134,11 +139,16 @@ Returns `204 No Content`. Returns `401` if the token is missing/invalid, `403` i
 
 ### POST /auth/password-reset/request
 
-```json
-{ "email": "alice@example.com" }
-```
-
 Returns `200 OK`. Always succeeds to prevent user enumeration. If SMTP is configured, a password-reset email is sent to the address containing a clickable link. When SMTP is not configured, the reset token is logged to stdout instead.
+
+The optional `app_url` field sets the base URL used to build the reset link in the email. It must be present in `ALLOWED_APP_URLS` when that variable is configured; omit it to use the server's default `APP_BASE_URL`.
+
+```json
+{
+  "email": "alice@example.com",
+  "app_url": "https://app.example.com"
+}
+```
 
 ---
 
@@ -251,7 +261,7 @@ On every startup, before the HTTP server binds, the service idempotently ensures
 |----------|---------|-------------|
 | `ADMIN_USERNAME` | `theboss` | Admin account username |
 | `ADMIN_EMAIL` | `admin@localhost` | Admin account email |
-| `ADMIN_PASSWORD` | `changeme` | Admin account password — **change in production** |
+| `ADMIN_PASSWORD` | `changeme` | Admin account password — **change in production** (supports `ADMIN_PASSWORD_FILE`) |
 
 Changing these env vars after first run has no effect until the existing account is deleted from the database.
 
@@ -282,10 +292,62 @@ All configuration is via environment variables (or a `.env` file):
 | `SMTP_HOST` | — | SMTP server hostname; omit to disable email sending |
 | `SMTP_PORT` | `587` | SMTP server port |
 | `SMTP_USERNAME` | — | SMTP authentication username (optional) |
-| `SMTP_PASSWORD` | — | SMTP authentication password (optional) |
+| `SMTP_PASSWORD` | — | SMTP authentication password (optional; see Docker secrets below) |
 | `SMTP_FROM` | — | From address for outgoing emails |
-| `APP_BASE_URL` | — | Base URL used to build confirmation links (e.g. `http://localhost:8081`) |
+| `APP_BASE_URL` | — | Default base URL used to build confirmation and reset links |
 | `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for MailHog) |
+| `ALLOWED_APP_URLS` | — | Comma-separated allowlist of `app_url` values accepted in `POST /users` and `POST /auth/password-reset/request` (see Multi-tenant below) |
+
+#### Docker secrets
+
+`JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a `_FILE` companion variable. When set, the value is read from that file (trailing whitespace trimmed) instead of the plain env var — this is the standard Docker / Compose secrets pattern.
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    secrets: [jwt_secret, smtp_password, admin_password]
+    environment:
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+
+secrets:
+  jwt_secret:
+    external: true
+  smtp_password:
+    external: true
+  admin_password:
+    external: true
+```
+
+If a `_FILE` variable is set but the file cannot be read, the service falls back to the plain env var with a warning log.
+
+---
+
+#### Multi-tenant email links
+
+When this auth service is shared across multiple front-end applications, each application can pass its own base URL in the request body:
+
+```json
+POST /users
+{ "email": "...", "username": "...", "password": "...", "app_url": "https://app2.example.com/fr" }
+
+POST /auth/password-reset/request
+{ "email": "...", "app_url": "https://app2.example.com/fr" }
+```
+
+Configure the allowlist to restrict which URLs are accepted:
+
+```
+ALLOWED_APP_URLS=https://app1.example.com,https://app2.example.com/fr
+```
+
+- When `ALLOWED_APP_URLS` is **not set**, any `app_url` in the request body is silently ignored and `APP_BASE_URL` is always used (single-tenant mode — secure by default).
+- When `ALLOWED_APP_URLS` **is set**, a supplied `app_url` must be in the list or the request is rejected with `400`.
+- Omitting `app_url` always falls back to `APP_BASE_URL` regardless of whether an allowlist is configured.
+
+---
 
 #### Geo-blocking setup
 

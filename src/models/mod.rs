@@ -49,6 +49,10 @@ pub struct CreateUserRequest {
     pub email: String,
     pub username: String,
     pub password: String,
+    /// Base URL of the calling application, used to build the confirmation-email link.
+    /// Must be present in `ALLOWED_APP_URLS` when that variable is configured.
+    /// Ignored when `ALLOWED_APP_URLS` is not set; falls back to `APP_BASE_URL`.
+    pub app_url: Option<String>,
 }
 
 /// Request body for user login.
@@ -78,6 +82,10 @@ pub struct ChangePasswordRequest {
 #[derive(Debug, Deserialize)]
 pub struct PasswordResetRequest {
     pub email: String,
+    /// Base URL of the calling application, used to build the password-reset link.
+    /// Must be present in `ALLOWED_APP_URLS` when that variable is configured.
+    /// Ignored when `ALLOWED_APP_URLS` is not set; falls back to `APP_BASE_URL`.
+    pub app_url: Option<String>,
 }
 
 /// Request body for confirming an email address.

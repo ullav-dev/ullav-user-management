@@ -1,3 +1,105 @@
+/// Tests for the `resolve_secret` helper in `main.rs`.
+#[cfg(test)]
+mod resolve_secret_tests {
+    use std::{env, fs, io::Write};
+    use crate::resolve_secret;
+
+    /// Helper: write `contents` to a named temp file and return the path.
+    fn tmp_file(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = env::temp_dir().join(name);
+        let mut f = fs::File::create(&path).expect("tmp file creation failed");
+        f.write_all(contents.as_bytes()).expect("tmp file write failed");
+        path
+    }
+
+    #[test]
+    fn test_plain_env_var_returned() {
+        let key = "RS_TEST_PLAIN";
+        env::set_var(key, "plain_value");
+        assert_eq!(resolve_secret(key), Some("plain_value".into()));
+        env::remove_var(key);
+    }
+
+    #[test]
+    fn test_returns_none_when_absent() {
+        // Use a name that is certainly not set in the environment.
+        assert_eq!(resolve_secret("RS_TEST_DEFINITELY_NOT_SET_XQ9Z"), None);
+    }
+
+    #[test]
+    fn test_file_variant_preferred_over_plain() {
+        let key = "RS_TEST_FILE_PREF";
+        let file_key = format!("{}_FILE", key);
+        let path = tmp_file("rs_test_file_pref.txt", "from_file");
+
+        env::set_var(&file_key, path.to_str().unwrap());
+        env::set_var(key, "from_plain");
+
+        assert_eq!(resolve_secret(key), Some("from_file".into()));
+
+        env::remove_var(&file_key);
+        env::remove_var(key);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_file_contents_are_trimmed() {
+        let key = "RS_TEST_TRIM";
+        let file_key = format!("{}_FILE", key);
+        // Docker secret files typically end with a newline.
+        let path = tmp_file("rs_test_trim.txt", "secret_value\n");
+
+        env::set_var(&file_key, path.to_str().unwrap());
+
+        assert_eq!(resolve_secret(key), Some("secret_value".into()));
+
+        env::remove_var(&file_key);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_falls_back_to_plain_when_file_unreadable() {
+        let key = "RS_TEST_FALLBACK";
+        let file_key = format!("{}_FILE", key);
+
+        env::set_var(&file_key, "/tmp/rs_test_this_file_does_not_exist_xq9z.txt");
+        env::set_var(key, "fallback_value");
+
+        assert_eq!(resolve_secret(key), Some("fallback_value".into()));
+
+        env::remove_var(&file_key);
+        env::remove_var(key);
+    }
+
+    #[test]
+    fn test_file_only_no_plain_fallback() {
+        let key = "RS_TEST_FILE_ONLY";
+        let file_key = format!("{}_FILE", key);
+        let path = tmp_file("rs_test_file_only.txt", "only_from_file");
+
+        env::set_var(&file_key, path.to_str().unwrap());
+        env::remove_var(key); // ensure plain var is absent
+
+        assert_eq!(resolve_secret(key), Some("only_from_file".into()));
+
+        env::remove_var(&file_key);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_unreadable_file_and_no_plain_returns_none() {
+        let key = "RS_TEST_NONE_FALLBACK";
+        let file_key = format!("{}_FILE", key);
+
+        env::set_var(&file_key, "/tmp/rs_test_no_such_file_xq9z.txt");
+        env::remove_var(key);
+
+        assert_eq!(resolve_secret(key), None);
+
+        env::remove_var(&file_key);
+    }
+}
+
 /// Unit tests for password utilities and JWT helpers.
 ///
 /// These tests run without a database connection and validate the
@@ -103,6 +205,7 @@ mod handler_tests {
             mailer: None,
             smtp_from: String::new(),
             app_base_url: String::new(),
+            allowed_app_urls: vec![],
         })
     }
 
@@ -170,6 +273,7 @@ mod health_tests {
             mailer: None,
             smtp_from: String::new(),
             app_base_url: String::new(),
+            allowed_app_urls: vec![],
         })
     }
 
@@ -210,5 +314,208 @@ mod health_tests {
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["database"], "ok");
+    }
+}
+
+/// Handler-level tests for the `app_url` allowlist feature.
+///
+/// These tests exercise `POST /users` and `POST /auth/password-reset/request`
+/// without a real database connection.  The fake pool URL is never reached
+/// because:
+///  - In `create_user` the `app_url` check now runs before any DB call, so a
+///    rejected URL returns 400 immediately.
+///  - In `request_password_reset` the DB call is inside `if let Ok(...)`, so
+///    an unreachable pool is silently swallowed and the handler still returns 200.
+#[cfg(test)]
+mod app_url_handler_tests {
+    use actix_web::{test, web, App};
+    use deadpool_postgres::{Config as PoolConfig, Runtime};
+    use serde_json::json;
+    use tokio_postgres::NoTls;
+
+    use crate::{
+        handlers::{auth::request_password_reset, users::create_user},
+        AppState,
+    };
+
+    fn make_state(allowed_app_urls: Vec<String>) -> web::Data<AppState> {
+        let mut cfg = PoolConfig::new();
+        cfg.url = Some("postgresql://user:pass@localhost/testdb".into());
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("pool construction must not fail for a bad url");
+        web::Data::new(AppState {
+            pool,
+            jwt_secret: "test_secret".into(),
+            jwt_ttl_hours: 1,
+            reset_token_ttl_minutes: 30,
+            confirmation_token_ttl_minutes: 1440,
+            mailer: None,
+            smtp_from: String::new(),
+            app_base_url: "https://default.example.com".into(),
+            allowed_app_urls,
+        })
+    }
+
+    // ── POST /users ──────────────────────────────────────────────────────────
+
+    /// Unlisted app_url with a configured allowlist must be rejected before any
+    /// DB work is attempted.
+    #[actix_web::test]
+    async fn test_create_user_unlisted_app_url_rejected() {
+        let state = make_state(vec!["https://allowed.example.com".into()]);
+        let app = test::init_service(App::new().app_data(state).service(create_user)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/users")
+            .insert_header(("content-type", "application/json"))
+            .set_json(json!({
+                "email": "user@example.com",
+                "username": "testuser",
+                "password": "longenough",
+                "app_url": "https://evil.example.com"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or("").contains("not in the list of allowed URLs"),
+            "expected allowlist error, got: {}",
+            body["error"]
+        );
+    }
+
+    /// When no allowlist is configured, any app_url in the request is silently
+    /// ignored — the handler proceeds (and fails at the unreachable DB, not at
+    /// app_url validation), so the response must not be a 400.
+    #[actix_web::test]
+    async fn test_create_user_app_url_ignored_without_allowlist() {
+        let state = make_state(vec![]); // no allowlist
+        let app = test::init_service(App::new().app_data(state).service(create_user)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/users")
+            .insert_header(("content-type", "application/json"))
+            .set_json(json!({
+                "email": "user@example.com",
+                "username": "testuser",
+                "password": "longenough",
+                "app_url": "https://arbitrary.example.com"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        // Must not be 400 (app_url validation); a 500 from the unreachable DB is fine here.
+        assert_ne!(resp.status().as_u16(), 400);
+    }
+
+    /// A listed app_url must pass validation and allow the handler to proceed to
+    /// the DB layer (which fails on the fake pool — that's expected; the point is
+    /// the response is not a 400 from app_url validation).
+    #[actix_web::test]
+    async fn test_create_user_listed_app_url_passes_validation() {
+        let state = make_state(vec!["https://allowed.example.com".into()]);
+        let app = test::init_service(App::new().app_data(state).service(create_user)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/users")
+            .insert_header(("content-type", "application/json"))
+            .set_json(json!({
+                "email": "user@example.com",
+                "username": "testuser",
+                "password": "longenough",
+                "app_url": "https://allowed.example.com"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_ne!(resp.status().as_u16(), 400);
+    }
+
+    // ── POST /auth/password-reset/request ────────────────────────────────────
+
+    /// Unlisted app_url is rejected before the DB call.
+    #[actix_web::test]
+    async fn test_password_reset_unlisted_app_url_rejected() {
+        let state = make_state(vec!["https://allowed.example.com".into()]);
+        let app =
+            test::init_service(App::new().app_data(state).service(request_password_reset)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/auth/password-reset/request")
+            .insert_header(("content-type", "application/json"))
+            .set_json(json!({
+                "email": "user@example.com",
+                "app_url": "https://evil.example.com"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or("").contains("not in the list of allowed URLs"),
+            "expected allowlist error, got: {}",
+            body["error"]
+        );
+    }
+
+    /// Listed app_url passes validation; the DB lookup is silently swallowed
+    /// (email not found → no-op), so the handler returns 200.
+    #[actix_web::test]
+    async fn test_password_reset_listed_app_url_returns_200() {
+        let state = make_state(vec!["https://allowed.example.com".into()]);
+        let app =
+            test::init_service(App::new().app_data(state).service(request_password_reset)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/auth/password-reset/request")
+            .insert_header(("content-type", "application/json"))
+            .set_json(json!({
+                "email": "nobody@example.com",
+                "app_url": "https://allowed.example.com"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    /// No app_url with no allowlist falls back to APP_BASE_URL; handler returns 200.
+    #[actix_web::test]
+    async fn test_password_reset_no_app_url_no_allowlist_returns_200() {
+        let state = make_state(vec![]);
+        let app =
+            test::init_service(App::new().app_data(state).service(request_password_reset)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/auth/password-reset/request")
+            .insert_header(("content-type", "application/json"))
+            .set_json(json!({ "email": "nobody@example.com" }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    /// No app_url with an allowlist configured also falls back to APP_BASE_URL.
+    #[actix_web::test]
+    async fn test_password_reset_no_app_url_with_allowlist_returns_200() {
+        let state = make_state(vec!["https://allowed.example.com".into()]);
+        let app =
+            test::init_service(App::new().app_data(state).service(request_password_reset)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/auth/password-reset/request")
+            .insert_header(("content-type", "application/json"))
+            .set_json(json!({ "email": "nobody@example.com" }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
     }
 }

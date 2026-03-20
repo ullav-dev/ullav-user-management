@@ -59,8 +59,8 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/models/mod.rs` — all request/response structs and DB model types
 - `src/errors.rs` — `AppError` enum; implements `actix_web::ResponseError` to map errors to HTTP status codes
 - `src/db/mod.rs` — all raw SQL queries (no ORM); returns `AppError` on failure
-- `src/handlers/users.rs` — `POST /users` (open; assigns `user` role on creation)
-- `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm`, `POST /auth/confirm-email`, `GET /auth/confirm-email` (link-click activation)
+- `src/handlers/users.rs` — `POST /users` (open; assigns `user` role on creation; accepts optional `app_url` for multi-tenant confirmation links)
+- `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request` (accepts optional `app_url`), `POST /auth/password-reset/confirm`, `POST /auth/confirm-email`, `GET /auth/confirm-email` (link-click activation)
 - `src/handlers/health.rs` — `GET /health` (admin-only; requires `health:read` permission)
 - `src/handlers/docs.rs` — `GET /openapi.yaml`, `GET /openapi.json` (YAML spec embedded via `include_str!`, converted to JSON with `serde_yaml`), `GET /docs` (Swagger UI via CDN); all three disabled when `ENABLE_DOCS=false`
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
@@ -69,10 +69,11 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 
 Middleware is registered in this order (innermost → outermost, i.e. outermost is processed first): `Logger` → `HttpsOnly` → `GeoBlock` → `Cors` (from `actix-cors`). `Cors` is outermost so OPTIONS preflight requests are answered before any auth or geo checks. Configured via `CORS_ORIGINS` env var.
 - `src/utils/jwt.rs` — `create_jwt` / `decode_jwt` using HS256; `Claims` carries `sub`, `iat`, `exp`, `roles`, `permissions`
+- `src/utils/app_url.rs` — `resolve_app_url(requested, allowed, fallback)`: validates caller-supplied `app_url` against the `ALLOWED_APP_URLS` allowlist; returns `APP_BASE_URL` fallback when no allowlist is configured or no URL is supplied
 - `src/seed.rs` — `seed_admin`: runs at startup, idempotently inserts the admin user (active, admin role) using `ADMIN_USERNAME/EMAIL/PASSWORD` env vars
 - `src/utils/email.rs` — `build_mailer` (STARTTLS or no-TLS), `send_confirmation_email`, `send_password_reset_email` (HTML emails via lettre)
 - `src/utils/password.rs` — Argon2id hashing, verification, validation, and secure token generation
-- `src/tests.rs` — unit tests for password utils and JWT helpers; handler smoke tests using `actix_web::test` (no real DB needed)
+- `src/tests.rs` — unit tests for password utils, JWT helpers, `resolve_secret`, `resolve_app_url`, and handler smoke tests using `actix_web::test` (no real DB needed)
 
 **Data flow:** handlers call `db::*` functions directly (no service layer). All DB functions take `&Pool` and return `Result<T, AppError>`. The `AppError` enum converts into JSON `{ "error": "..." }` responses automatically.
 
@@ -84,7 +85,9 @@ Middleware is registered in this order (innermost → outermost, i.e. outermost 
 
 ## Configuration
 
-All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440), `ENABLE_DOCS` (default `true` — set `false` in production to disable `/openapi.yaml`, `/openapi.json`, `/docs`), `WHITELIST` (comma-separated IPs allowed to use plain HTTP in addition to localhost), `GEOBLOCK` (comma-separated ISO 3166-1 alpha-2 country codes to deny — requires `GEOIP_DB`), `GEOIP_DB` (path to a MaxMind GeoLite2-Country or GeoIP2-Country `.mmdb` file), `CORS_ORIGINS` (`*` to allow any origin, or comma-separated list of allowed origins e.g. `https://app.example.com`). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). See `.env.example` for all variables and defaults.
+All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440), `ENABLE_DOCS` (default `true` — set `false` in production to disable `/openapi.yaml`, `/openapi.json`, `/docs`), `WHITELIST` (comma-separated IPs allowed to use plain HTTP in addition to localhost), `GEOBLOCK` (comma-separated ISO 3166-1 alpha-2 country codes to deny — requires `GEOIP_DB`), `GEOIP_DB` (path to a MaxMind GeoLite2-Country or GeoIP2-Country `.mmdb` file), `CORS_ORIGINS` (`*` to allow any origin, or comma-separated list of allowed origins e.g. `https://app.example.com`). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). Multi-tenant email links: `ALLOWED_APP_URLS` (comma-separated list of permitted `app_url` values that clients may supply in `POST /users` and `POST /auth/password-reset/request`; omit for single-tenant deployments). See `.env.example` for all variables and defaults.
+
+**Docker secrets (`_FILE` convention):** `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a companion `_FILE` variable (e.g. `JWT_SECRET_FILE=/run/secrets/jwt_secret`). When set, the value is read from that file (contents trimmed) instead of the plain env var. If the file is unreadable, the service falls back to the plain env var with a warning. This follows the standard Docker secrets pattern.
 
 ## Admin seed (`src/seed.rs`)
 

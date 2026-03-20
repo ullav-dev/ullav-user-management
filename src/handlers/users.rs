@@ -3,6 +3,7 @@ use crate::{
     errors::AppError,
     models::CreateUserRequest,
     utils::{
+        app_url::resolve_app_url,
         email::send_confirmation_email,
         password::{generate_secure_token, hash_password, validate_password},
     },
@@ -26,6 +27,12 @@ pub async fn create_user(
         return Err(AppError::Validation("username must not be empty".into()));
     }
 
+    let base_url = resolve_app_url(
+        body.app_url.as_deref(),
+        &state.allowed_app_urls,
+        &state.app_base_url,
+    )?;
+
     let hash = hash_password(&body.password)?;
     let user = db::create_user(&state.pool, &body.email, &body.username, &hash).await?;
 
@@ -39,7 +46,7 @@ pub async fn create_user(
             mailer,
             &state.smtp_from,
             &body.email,
-            &state.app_base_url,
+            &base_url,
             &token,
         )
         .await

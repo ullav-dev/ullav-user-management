@@ -12,7 +12,7 @@ info:
     **Security:** All endpoints require HTTPS unless the client IP is localhost or whitelisted.
     Requests from geo-blocked countries are rejected with `403`. CORS headers are emitted when
     `CORS_ORIGINS` is configured.
-  version: 0.2.0
+  version: 0.3.0
 
 servers:
   - url: http://localhost:8081
@@ -57,6 +57,11 @@ paths:
         Creates an inactive account and returns a confirmation token. When SMTP is configured,
         a confirmation email is also sent to the provided address. The account must be activated
         via `POST /auth/confirm-email` or the link in the confirmation email before login is allowed.
+
+        The optional `app_url` field sets the base URL used to build the confirmation link in the
+        email. It must be present in the server's `ALLOWED_APP_URLS` allowlist when that variable
+        is configured. Omit it to use the server's default `APP_BASE_URL`. When `ALLOWED_APP_URLS`
+        is not configured, any supplied value is ignored.
       operationId: createUser
       tags: [Users]
       requestBody:
@@ -65,10 +70,20 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateUserRequest'
-            example:
-              email: alice@example.com
-              username: alice
-              password: s3cretP@ss
+            examples:
+              without_app_url:
+                summary: Single-tenant (no app_url)
+                value:
+                  email: alice@example.com
+                  username: alice
+                  password: s3cretP@ss
+              with_app_url:
+                summary: Multi-tenant (app_url supplied)
+                value:
+                  email: alice@example.com
+                  username: alice
+                  password: s3cretP@ss
+                  app_url: https://app.example.com
       responses:
         '200':
           description: User created (inactive). Confirm email to activate the account.
@@ -215,6 +230,11 @@ paths:
         user enumeration. When SMTP is configured, a password-reset link is sent to
         the address. When SMTP is not configured, the token is logged to stdout.
         The token is never returned in the response body.
+
+        The optional `app_url` field sets the base URL used to build the reset link in the
+        email. It must be present in the server's `ALLOWED_APP_URLS` allowlist when that variable
+        is configured. Omit it to use the server's default `APP_BASE_URL`. When `ALLOWED_APP_URLS`
+        is not configured, any supplied value is ignored.
       operationId: requestPasswordReset
       tags: [Auth]
       requestBody:
@@ -223,8 +243,16 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/PasswordResetRequest'
-            example:
-              email: alice@example.com
+            examples:
+              without_app_url:
+                summary: Single-tenant (no app_url)
+                value:
+                  email: alice@example.com
+              with_app_url:
+                summary: Multi-tenant (app_url supplied)
+                value:
+                  email: alice@example.com
+                  app_url: https://app.example.com
       responses:
         '200':
           description: Request processed (email may or may not be registered)
@@ -298,6 +326,13 @@ components:
         password:
           type: string
           minLength: 8
+        app_url:
+          type: string
+          format: uri
+          description: |
+            Base URL of the calling application, used to build the confirmation-email link.
+            Must be in the server's ALLOWED_APP_URLS allowlist when that variable is configured.
+            Ignored when ALLOWED_APP_URLS is not set; falls back to APP_BASE_URL.
 
     LoginRequest:
       type: object
@@ -363,6 +398,13 @@ components:
         email:
           type: string
           format: email
+        app_url:
+          type: string
+          format: uri
+          description: |
+            Base URL of the calling application, used to build the password-reset link.
+            Must be in the server's ALLOWED_APP_URLS allowlist when that variable is configured.
+            Ignored when ALLOWED_APP_URLS is not set; falls back to APP_BASE_URL.
 
     PasswordResetConfirm:
       type: object

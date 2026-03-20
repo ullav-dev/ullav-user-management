@@ -6,6 +6,7 @@ use crate::{
         PasswordResetConfirm, PasswordResetRequest,
     },
     utils::{
+        app_url::resolve_app_url,
         email::send_password_reset_email,
         jwt::{create_jwt, decode_jwt, Claims},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
@@ -111,6 +112,12 @@ pub async fn request_password_reset(
     state: web::Data<AppState>,
     body: web::Json<PasswordResetRequest>,
 ) -> Result<HttpResponse, AppError> {
+    let base_url = resolve_app_url(
+        body.app_url.as_deref(),
+        &state.allowed_app_urls,
+        &state.app_base_url,
+    )?;
+
     // Silently ignore unknown emails to prevent enumeration.
     if let Ok(user) = db::get_user_by_email(&state.pool, &body.email).await {
         let token = generate_secure_token();
@@ -122,7 +129,7 @@ pub async fn request_password_reset(
                 mailer,
                 &state.smtp_from,
                 &body.email,
-                &state.app_base_url,
+                &base_url,
                 &token,
             )
             .await

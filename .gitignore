@@ -27,3 +27,5 @@ target
 
 /target
 .env
+.env.prod
+secrets/

@@ -38,6 +38,30 @@ docker compose up --build
 docker compose up db
 ```
 
+### Production deployment
+
+Uses `docker-compose-prod.yml` + `.env.prod`. Both services run on the external `ullav-net` network with no host port bindings. Passwords are injected via Docker secrets mounted at `/run/secrets/*`.
+
+`docker-entrypoint.sh` is bind-mounted into the app container. It reads `/run/secrets/db_password` and assembles `DATABASE_URL` before exec'ing the binary — necessary because `DATABASE_URL` has no native `_FILE` support in the app (only `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` do).
+
+```bash
+# Pre-requisite: create the shared network (once)
+docker network create ullav-net
+
+# Populate secret files (never commit these)
+mkdir -p secrets
+echo -n "strong-db-password"  > secrets/db_password.txt
+echo -n "long-random-jwt-key" > secrets/jwt_secret.txt
+echo -n "smtp-password"       > secrets/smtp_password.txt
+echo -n "admin-password"      > secrets/admin_password.txt
+chmod 600 secrets/*.txt
+
+# Edit .env.prod with real SMTP host, domain, etc., then deploy
+docker compose -f docker-compose-prod.yml --env-file .env.prod up -d
+```
+
+`.env.prod` and `secrets/` are `.gitignore`d.
+
 ### Local setup without Docker
 
 ```bash

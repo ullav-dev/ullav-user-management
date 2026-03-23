@@ -223,6 +223,46 @@ The API will be available at `http://localhost:8081`.
 >   -f migrations/003_rbac.sql
 > ```
 
+### Production deployment
+
+`docker-compose-prod.yml` is the production Compose file. Both services run on an external `ullav-net` Docker network with **no host port bindings** — the service is reachable only by other containers on that network. All four passwords are injected via Docker secrets.
+
+**One-time network setup:**
+
+```bash
+docker network create ullav-net
+```
+
+**Populate secret files** (keep these out of version control):
+
+```bash
+mkdir -p secrets
+echo -n "strong-db-password"  > secrets/db_password.txt
+echo -n "long-random-jwt-key" > secrets/jwt_secret.txt
+echo -n "smtp-password"       > secrets/smtp_password.txt
+echo -n "admin-password"      > secrets/admin_password.txt
+chmod 600 secrets/*.txt
+```
+
+**Configure non-secret variables:**
+
+```bash
+cp .env.prod .env.prod.local   # if you want a local override
+# Edit .env.prod — set SMTP_HOST, APP_BASE_URL, ADMIN_EMAIL, etc.
+```
+
+**Deploy:**
+
+```bash
+docker compose -f docker-compose-prod.yml --env-file .env.prod up -d
+```
+
+> `.env.prod` and `secrets/` are `.gitignore`d so they are never committed.
+
+> `docker-entrypoint.sh` is bind-mounted into the app container at startup. It reads `/run/secrets/db_password` and assembles `DATABASE_URL` before exec'ing the binary — necessary because `DATABASE_URL` has no native `_FILE` support (only `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` do).
+
+---
+
 ### Running locally (without Docker)
 
 ```bash
@@ -302,23 +342,33 @@ All configuration is via environment variables (or a `.env` file):
 
 `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a `_FILE` companion variable. When set, the value is read from that file (trailing whitespace trimmed) instead of the plain env var — this is the standard Docker / Compose secrets pattern.
 
+`DATABASE_URL` does not have native `_FILE` support. In `docker-compose-prod.yml` this is handled by `docker-entrypoint.sh`, which reads `/run/secrets/db_password` and assembles `DATABASE_URL` before starting the binary. The PostgreSQL container uses `POSTGRES_PASSWORD_FILE` natively.
+
 ```yaml
-# docker-compose.yml
+# docker-compose-prod.yml (excerpt)
 services:
+  db:
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+
   app:
-    secrets: [jwt_secret, smtp_password, admin_password]
+    entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]   # builds DATABASE_URL
+    secrets: [db_password, jwt_secret, smtp_password, admin_password]
     environment:
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
 
 secrets:
+  db_password:
+    file: ./secrets/db_password.txt
   jwt_secret:
-    external: true
+    file: ./secrets/jwt_secret.txt
   smtp_password:
-    external: true
+    file: ./secrets/smtp_password.txt
   admin_password:
-    external: true
+    file: ./secrets/admin_password.txt
 ```
 
 If a `_FILE` variable is set but the file cannot be read, the service falls back to the plain env var with a warning log.

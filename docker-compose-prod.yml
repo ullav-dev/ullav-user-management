@@ -1,0 +1,60 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DATABASE_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: ${DATABASE_NAME}
+    secrets:
+      - db_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - ullav-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER} -d ${DATABASE_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    image: ghcr.io/ullav-dev/ullav-user-management:latest
+    env_file: .env.prod
+    environment:
+      # Secrets injected via _FILE convention — values read from /run/secrets/*
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]
+    volumes:
+      - ./docker-entrypoint.sh:/app/docker-entrypoint.sh:ro
+    secrets:
+      - db_password
+      - jwt_secret
+      - smtp_password
+      - admin_password
+    networks:
+      - ullav-net
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  ullav-net:
+    external: true
+
+volumes:
+  postgres_data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  smtp_password:
+    file: ./secrets/smtp_password.txt
+  admin_password:
+    file: ./secrets/admin_password.txt

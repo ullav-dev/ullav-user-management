@@ -60,8 +60,6 @@ async fn main() -> std::io::Result<()> {
     dotenv().ok();
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
-    let database_url = env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
     let jwt_secret = resolve_secret("JWT_SECRET")
         .expect("JWT_SECRET (or JWT_SECRET_FILE) must be set");
     let jwt_ttl_hours: i64 = env::var("JWT_TTL_HOURS")
@@ -201,8 +199,26 @@ async fn main() -> std::io::Result<()> {
     let admin_email    = env::var("ADMIN_EMAIL").unwrap_or_else(|_| "admin@localhost".into());
 
     // Build the connection pool.
+    // Prefer DATABASE_URL when set; otherwise use individual parameters
+    // (DATABASE_HOST/USER/PASSWORD/NAME/PORT). The individual-param path
+    // supports DATABASE_PASSWORD_FILE so the password never needs to be
+    // embedded in a URL (special characters in passwords break URL parsing).
     let mut cfg = PoolConfig::new();
-    cfg.url = Some(database_url);
+    if let Ok(url) = env::var("DATABASE_URL") {
+        cfg.url = Some(url);
+    } else {
+        cfg.host = Some(env::var("DATABASE_HOST").unwrap_or_else(|_| "localhost".into()));
+        cfg.user = Some(env::var("DATABASE_USER").expect(
+            "DATABASE_USER must be set when DATABASE_URL is not provided",
+        ));
+        cfg.password = resolve_secret("DATABASE_PASSWORD");
+        cfg.dbname = Some(env::var("DATABASE_NAME").expect(
+            "DATABASE_NAME must be set when DATABASE_URL is not provided",
+        ));
+        if let Ok(port_str) = env::var("DATABASE_PORT") {
+            cfg.port = Some(port_str.parse().expect("DATABASE_PORT must be a number"));
+        }
+    }
     let pool = cfg
         .create_pool(Some(Runtime::Tokio1), NoTls)
         .expect("failed to create database pool");

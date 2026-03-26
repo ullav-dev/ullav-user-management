@@ -199,26 +199,11 @@ async fn main() -> std::io::Result<()> {
     let admin_email    = env::var("ADMIN_EMAIL").unwrap_or_else(|_| "admin@localhost".into());
 
     // Build the connection pool.
-    // Prefer DATABASE_URL when set; otherwise use individual parameters
-    // (DATABASE_HOST/USER/PASSWORD/NAME/PORT). The individual-param path
-    // supports DATABASE_PASSWORD_FILE so the password never needs to be
-    // embedded in a URL (special characters in passwords break URL parsing).
+    // Supports DATABASE_URL_FILE (Docker secrets) as well as a plain DATABASE_URL.
+    let database_url = resolve_secret("DATABASE_URL")
+        .expect("DATABASE_URL (or DATABASE_URL_FILE) must be set");
     let mut cfg = PoolConfig::new();
-    if let Ok(url) = env::var("DATABASE_URL") {
-        cfg.url = Some(url);
-    } else {
-        cfg.host = Some(env::var("DATABASE_HOST").unwrap_or_else(|_| "localhost".into()));
-        cfg.user = Some(env::var("DATABASE_USER").expect(
-            "DATABASE_USER must be set when DATABASE_URL is not provided",
-        ));
-        cfg.password = resolve_secret("DATABASE_PASSWORD");
-        cfg.dbname = Some(env::var("DATABASE_NAME").expect(
-            "DATABASE_NAME must be set when DATABASE_URL is not provided",
-        ));
-        if let Ok(port_str) = env::var("DATABASE_PORT") {
-            cfg.port = Some(port_str.parse().expect("DATABASE_PORT must be a number"));
-        }
-    }
+    cfg.url = Some(database_url);
     let pool = cfg
         .create_pool(Some(Runtime::Tokio1), NoTls)
         .expect("failed to create database pool");

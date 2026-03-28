@@ -35,7 +35,10 @@ services:
     restart: "no"
 
   app:
+    build: .
     image: ghcr.io/ullav-dev/ullav-user-management:latest
+    container_name: user-management
+    init: true
     env_file: .env.prod
     environment:
       # Secrets injected via _FILE convention — values read from /run/secrets/*
@@ -43,9 +46,6 @@ services:
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
-    entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]
-    volumes:
-      - ./docker-entrypoint.sh:/app/docker-entrypoint.sh:ro
     secrets:
       - database_url
       - jwt_secret

@@ -209,6 +209,9 @@ pub async fn confirm_password_reset(
     let new_hash = hash_password(&body.new_password)?;
     db::update_password(&state.pool, record.user_id, &new_hash).await?;
     db::consume_reset_token(&state.pool, &body.token).await?;
+    // Activate the user if they haven't confirmed their email yet —
+    // a successful password reset is sufficient proof of email ownership.
+    db::activate_user(&state.pool, record.user_id).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

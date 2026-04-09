@@ -40,9 +40,11 @@ docker compose up db
 
 ### Production deployment
 
-Uses `docker-compose-prod.yml` + `.env.prod`. Both services run on the external `ullav-net` network with no host port bindings. Passwords are injected via Docker secrets mounted at `/run/secrets/*`.
+Uses `docker-compose-prod.yaml` + `.env.prod`. Three services (`db`, `migrate`, `app`) run on the external `ullav-net` network with no host port bindings. All secrets are injected via Docker secrets mounted at `/run/secrets/*`.
 
-`docker-entrypoint.sh` is bind-mounted into the app container. It reads `/run/secrets/db_password` and assembles `DATABASE_URL` before exec'ing the binary — necessary because `DATABASE_URL` has no native `_FILE` support in the app (only `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` do).
+`migrate` service runs `scripts/migrate.sh` before the app starts. The script creates a `schema_migrations` tracking table (if absent), then applies any `.sql` files in `migrations/` not yet recorded. The `app` service has `depends_on: migrate: condition: service_completed_successfully`.
+
+`docker-entrypoint.sh` is a thin wrapper that simply exec's the binary. `DATABASE_URL` is now passed as its own secret (`DATABASE_URL_FILE=/run/secrets/database_url`), so no URL assembly is needed in the entrypoint.
 
 ```bash
 # Pre-requisite: create the shared network (once)
@@ -50,6 +52,7 @@ docker network create ullav-net
 
 # Populate secret files (never commit these)
 mkdir -p secrets
+echo -n "postgresql://user:pass@db:5432/user_management" > secrets/database_url.txt
 echo -n "strong-db-password"  > secrets/db_password.txt
 echo -n "long-random-jwt-key" > secrets/jwt_secret.txt
 echo -n "smtp-password"       > secrets/smtp_password.txt
@@ -57,7 +60,7 @@ echo -n "admin-password"      > secrets/admin_password.txt
 chmod 600 secrets/*.txt
 
 # Edit .env.prod with real SMTP host, domain, etc., then deploy
-docker compose -f docker-compose-prod.yml --env-file .env.prod up -d
+docker compose -f docker-compose-prod.yaml --env-file .env.prod up -d
 ```
 
 `.env.prod` and `secrets/` are `.gitignore`d.
@@ -70,6 +73,7 @@ cp .env.example .env
 psql "$DATABASE_URL" -f migrations/001_initial.sql
 psql "$DATABASE_URL" -f migrations/002_email_confirmation.sql
 psql "$DATABASE_URL" -f migrations/003_rbac.sql
+psql "$DATABASE_URL" -f migrations/004_collection_permissions.sql
 cargo run
 ```
 
@@ -84,7 +88,7 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/errors.rs` — `AppError` enum; implements `actix_web::ResponseError` to map errors to HTTP status codes
 - `src/db/mod.rs` — all raw SQL queries (no ORM); returns `AppError` on failure
 - `src/handlers/users.rs` — `POST /users` (open; assigns `user` role on creation; accepts optional `app_url` for multi-tenant confirmation links)
-- `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request` (accepts optional `app_url`), `POST /auth/password-reset/confirm`, `POST /auth/confirm-email`, `GET /auth/confirm-email` (link-click activation)
+- `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request` (accepts optional `app_url`), `POST /auth/password-reset/confirm` (also activates the user if not yet confirmed — password reset proves email ownership), `POST /auth/confirm-email`, `GET /auth/confirm-email` (link-click activation)
 - `src/handlers/health.rs` — `GET /health` (admin-only; requires `health:read` permission)
 - `src/handlers/docs.rs` — `GET /openapi.yaml`, `GET /openapi.json` (YAML spec embedded via `include_str!`, converted to JSON with `serde_yaml`), `GET /docs` (Swagger UI via CDN); all three disabled when `ENABLE_DOCS=false`
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
@@ -101,17 +105,17 @@ Middleware is registered in this order (innermost → outermost, i.e. outermost 
 
 **Data flow:** handlers call `db::*` functions directly (no service layer). All DB functions take `&Pool` and return `Result<T, AppError>`. The `AppError` enum converts into JSON `{ "error": "..." }` responses automatically.
 
-**Database:** PostgreSQL only, native SQL via `tokio-postgres`. Schema is in `migrations/001_initial.sql`; email-confirmation columns are added by `migrations/002_email_confirmation.sql`; RBAC tables (`roles`, `permissions`, `role_permissions`, `user_roles`) and seed data are in `migrations/003_rbac.sql`. The `docker-compose.yml` mounts `001_initial.sql` into the Postgres `docker-entrypoint-initdb.d/` directory so it runs automatically on first start; `002_email_confirmation.sql` and `003_rbac.sql` must be applied manually.
+**Database:** PostgreSQL only, native SQL via `tokio-postgres`. Schema is in `migrations/001_initial.sql`; email-confirmation columns are added by `migrations/002_email_confirmation.sql`; RBAC tables (`roles`, `permissions`, `role_permissions`, `user_roles`) and seed data are in `migrations/003_rbac.sql`; collection-server roles/permissions (`collection_admin`, `curator`, `registrar`) are in `migrations/004_collection_permissions.sql`. In production, all migrations are applied automatically by the `migrate` service. In dev Docker Compose, `001_initial.sql` runs automatically; the rest must be applied manually.
 
 **JWT:** Tokens carry `{ sub, iat, exp, roles, permissions }` claims where `sub` is the user UUID as a string. `AuthMiddleware` validates Bearer tokens and injects `Claims` into request extensions. `PUT /users/{id}/password` requires a valid JWT (ownership or `users:change_any_password` permission). `GET /health` requires the `health:read` permission (admin only).
 
-**RBAC:** Two seeded roles: `admin` (has `health:read` and `users:change_any_password`) and `user` (no permissions). New users are automatically assigned the `user` role on registration. Promote a user to admin by inserting a row into `user_roles`.
+**RBAC:** Seeded roles: `admin` (has `health:read`, `users:change_any_password`, and all collection permissions), `user` (no permissions), `collection_admin`, `curator`, `registrar` (see `migrations/004_collection_permissions.sql` for permission sets). New users are automatically assigned the `user` role on registration. Promote a user by inserting a row into `user_roles`.
 
 ## Configuration
 
 All config is read from environment variables at startup (`.env` loaded via `dotenv`). Required: `DATABASE_URL`, `JWT_SECRET`. Optional: `JWT_TTL_HOURS` (default 24), `RESET_TOKEN_TTL_MINUTES` (default 30), `CONFIRMATION_TOKEN_TTL_MINUTES` (default 1440), `ENABLE_DOCS` (default `true` — set `false` in production to disable `/openapi.yaml`, `/openapi.json`, `/docs`), `WHITELIST` (comma-separated IPs allowed to use plain HTTP in addition to localhost), `GEOBLOCK` (comma-separated ISO 3166-1 alpha-2 country codes to deny — requires `GEOIP_DB`), `GEOIP_DB` (path to a MaxMind GeoLite2-Country or GeoIP2-Country `.mmdb` file), `CORS_ORIGINS` (`*` to allow any origin, or comma-separated list of allowed origins e.g. `https://app.example.com`). SMTP (all optional — email disabled when `SMTP_HOST` absent): `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `APP_BASE_URL`, `SMTP_NO_TLS` (set `true` for MailHog/no-TLS testing). Multi-tenant email links: `ALLOWED_APP_URLS` (comma-separated list of permitted `app_url` values that clients may supply in `POST /users` and `POST /auth/password-reset/request`; omit for single-tenant deployments). See `.env.example` for all variables and defaults.
 
-**Docker secrets (`_FILE` convention):** `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a companion `_FILE` variable (e.g. `JWT_SECRET_FILE=/run/secrets/jwt_secret`). When set, the value is read from that file (contents trimmed) instead of the plain env var. If the file is unreadable, the service falls back to the plain env var with a warning. This follows the standard Docker secrets pattern.
+**Docker secrets (`_FILE` convention):** `DATABASE_URL`, `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a companion `_FILE` variable (e.g. `JWT_SECRET_FILE=/run/secrets/jwt_secret`). When set, the value is read from that file (contents trimmed) instead of the plain env var. If the file is unreadable, the service falls back to the plain env var with a warning.
 
 ## Admin seed (`src/seed.rs`)
 

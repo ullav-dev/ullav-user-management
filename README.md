@@ -161,7 +161,7 @@ The optional `app_url` field sets the base URL used to build the reset link in t
 }
 ```
 
-Returns `204 No Content`.
+Returns `204 No Content`. If the account is not yet active (email confirmation never completed), it is activated automatically — a successful password reset is treated as sufficient proof of email ownership.
 
 ---
 
@@ -220,12 +220,15 @@ The API will be available at `http://localhost:8081`.
 > ```bash
 > psql "postgresql://app_user:app_password@localhost:5433/user_management" \
 >   -f migrations/002_email_confirmation.sql \
->   -f migrations/003_rbac.sql
+>   -f migrations/003_rbac.sql \
+>   -f migrations/004_collection_permissions.sql
 > ```
 
 ### Production deployment
 
-`docker-compose-prod.yml` is the production Compose file. Both services run on an external `ullav-net` Docker network with **no host port bindings** — the service is reachable only by other containers on that network. All four passwords are injected via Docker secrets.
+`docker-compose-prod.yaml` is the production Compose file. Three services (`db`, `migrate`, `app`) run on an external `ullav-net` Docker network with **no host port bindings**. All secrets are injected via Docker secrets.
+
+The `migrate` service runs `scripts/migrate.sh` once on deploy — it applies any unapplied migrations from `migrations/` in order, tracking state in a `schema_migrations` table. The `app` service only starts after `migrate` completes successfully.
 
 **One-time network setup:**
 
@@ -237,6 +240,7 @@ docker network create ullav-net
 
 ```bash
 mkdir -p secrets
+echo -n "postgresql://myuser:mypass@db:5432/user_management" > secrets/database_url.txt
 echo -n "strong-db-password"  > secrets/db_password.txt
 echo -n "long-random-jwt-key" > secrets/jwt_secret.txt
 echo -n "smtp-password"       > secrets/smtp_password.txt
@@ -247,19 +251,16 @@ chmod 600 secrets/*.txt
 **Configure non-secret variables:**
 
 ```bash
-cp .env.prod .env.prod.local   # if you want a local override
-# Edit .env.prod — set SMTP_HOST, APP_BASE_URL, ADMIN_EMAIL, etc.
+# Edit .env.prod — set SMTP_HOST, APP_BASE_URL, ADMIN_EMAIL, DATABASE_USER, DATABASE_NAME, etc.
 ```
 
 **Deploy:**
 
 ```bash
-docker compose -f docker-compose-prod.yml --env-file .env.prod up -d
+docker compose -f docker-compose-prod.yaml --env-file .env.prod up -d
 ```
 
 > `.env.prod` and `secrets/` are `.gitignore`d so they are never committed.
-
-> `docker-entrypoint.sh` is bind-mounted into the app container at startup. It reads `/run/secrets/db_password` and assembles `DATABASE_URL` before exec'ing the binary — necessary because `DATABASE_URL` has no native `_FILE` support (only `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` do).
 
 ---
 
@@ -274,6 +275,7 @@ cp .env.example .env
 psql "$DATABASE_URL" -f migrations/001_initial.sql
 psql "$DATABASE_URL" -f migrations/002_email_confirmation.sql
 psql "$DATABASE_URL" -f migrations/003_rbac.sql
+psql "$DATABASE_URL" -f migrations/004_collection_permissions.sql
 
 # 3. Run
 cargo run
@@ -340,12 +342,10 @@ All configuration is via environment variables (or a `.env` file):
 
 #### Docker secrets
 
-`JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a `_FILE` companion variable. When set, the value is read from that file (trailing whitespace trimmed) instead of the plain env var — this is the standard Docker / Compose secrets pattern.
-
-`DATABASE_URL` does not have native `_FILE` support. In `docker-compose-prod.yml` this is handled by `docker-entrypoint.sh`, which reads `/run/secrets/db_password` and assembles `DATABASE_URL` before starting the binary. The PostgreSQL container uses `POSTGRES_PASSWORD_FILE` natively.
+`DATABASE_URL`, `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a `_FILE` companion variable. When set, the value is read from that file (trailing whitespace trimmed) instead of the plain env var. If the file is unreadable, the service falls back to the plain env var with a warning log.
 
 ```yaml
-# docker-compose-prod.yml (excerpt)
+# docker-compose-prod.yaml (excerpt)
 services:
   db:
     environment:
@@ -353,9 +353,9 @@ services:
     secrets: [db_password]
 
   app:
-    entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]   # builds DATABASE_URL
-    secrets: [db_password, jwt_secret, smtp_password, admin_password]
+    secrets: [database_url, jwt_secret, smtp_password, admin_password]
     environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
@@ -363,6 +363,8 @@ services:
 secrets:
   db_password:
     file: ./secrets/db_password.txt
+  database_url:
+    file: ./secrets/database_url.txt
   jwt_secret:
     file: ./secrets/jwt_secret.txt
   smtp_password:
@@ -370,8 +372,6 @@ secrets:
   admin_password:
     file: ./secrets/admin_password.txt
 ```
-
-If a `_FILE` variable is set but the file cannot be read, the service falls back to the plain env var with a warning log.
 
 ---
 
@@ -436,8 +436,11 @@ Emails are visible at `http://localhost:8025`.
 
 Migrations are applied in order:
 
-| Migration | Tables |
-|-----------|--------|
+| Migration | Tables / changes |
+|-----------|-----------------|
 | `001_initial.sql` | `users`, `password_reset_tokens` |
 | `002_email_confirmation.sql` | Adds `confirmation_token` columns to `users` |
-| `003_rbac.sql` | `roles`, `permissions`, `role_permissions`, `user_roles` |
+| `003_rbac.sql` | `roles`, `permissions`, `role_permissions`, `user_roles`; seeds `admin` and `user` roles |
+| `004_collection_permissions.sql` | Seeds collection permissions and roles: `collection_admin`, `curator`, `registrar` |
+
+In production, migrations are applied automatically by the `migrate` service on each deploy (idempotent — already-applied files are skipped). For local development without Docker, apply them manually with `psql` as shown above.

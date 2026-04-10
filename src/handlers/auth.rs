@@ -8,7 +8,7 @@ use crate::{
     utils::{
         app_url::resolve_app_url,
         email::send_password_reset_email,
-        jwt::{create_jwt, decode_jwt, Claims},
+        jwt::{create_jwt, decode_jwt, Claims, SubscriptionClaim},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
     AppState,
@@ -38,14 +38,29 @@ pub async fn login(
 
     let (roles, permissions) =
         db::get_user_roles_and_permissions(&state.pool, user.id).await?;
-    // Phase 4 will populate subscriptions from the DB here.
+
+    // Build subscription claims from the DB — keyed by product slug.
+    // Users with no subscription rows get an empty map (treated as Individual by clients).
+    let raw_subs = db::get_all_user_subscriptions(&state.pool, user.id).await?;
+    let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
+        .into_iter()
+        .map(|s| {
+            let claim = SubscriptionClaim {
+                tier: s.plan.clone(),
+                status: s.status.clone(),
+                seat_count: if s.seat_count > 1 { Some(s.seat_count) } else { None },
+            };
+            (s.product_slug, claim)
+        })
+        .collect();
+
     let token = create_jwt(
         user.id,
         &state.jwt_secret,
         state.jwt_ttl_hours,
         roles.clone(),
         permissions.clone(),
-        HashMap::new(),
+        subscriptions,
     )?;
     let response = LoginResponse {
         token,

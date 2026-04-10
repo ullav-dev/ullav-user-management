@@ -287,8 +287,7 @@ pub async fn get_subscription(
 
 /// Fetch all active/trialing subscriptions for a user across all products.
 ///
-/// Returns a list of Subscriptions used when building JWT claims (Phase 4).
-#[allow(dead_code)]
+/// Called at login to populate the `subscriptions` JWT claim.
 pub async fn get_all_user_subscriptions(
     pool: &Pool,
     user_id: Uuid,

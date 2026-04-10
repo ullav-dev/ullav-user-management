@@ -1,5 +1,5 @@
 use crate::errors::AppError;
-use crate::models::{PasswordResetToken, User};
+use crate::models::{PasswordResetToken, Subscription, User};
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
@@ -252,6 +252,182 @@ pub async fn assign_role(pool: &Pool, user_id: Uuid, role_name: &str) -> Result<
     Ok(())
 }
 
+// ── Subscriptions ────────────────────────────────────────────────────────────
+
+/// Fetch the active/trialing subscription for a user and product slug.
+///
+/// Returns `None` when the user has no subscription for that product
+/// (callers should treat this as an Individual/free tier).
+pub async fn get_subscription(
+    pool: &Pool,
+    user_id: Uuid,
+    product_slug: &str,
+) -> Result<Option<Subscription>, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT s.id, s.user_id, s.product_id, p.slug AS product_slug,
+                    s.plan, s.status, s.payment_provider,
+                    s.provider_subscription_id, s.provider_customer_id,
+                    s.seat_count, s.trial_end,
+                    s.current_period_start, s.current_period_end,
+                    s.created_at, s.updated_at
+             FROM subscriptions s
+             JOIN products p ON p.id = s.product_id
+             WHERE s.user_id = $1
+               AND p.slug    = $2
+               AND s.status IN ('active','trialing','past_due')
+             LIMIT 1",
+            &[&user_id, &product_slug],
+        )
+        .await?;
+
+    Ok(row.as_ref().map(row_to_subscription))
+}
+
+/// Fetch all active/trialing subscriptions for a user across all products.
+///
+/// Returns a list of Subscriptions used when building JWT claims (Phase 4).
+#[allow(dead_code)]
+pub async fn get_all_user_subscriptions(
+    pool: &Pool,
+    user_id: Uuid,
+) -> Result<Vec<Subscription>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT s.id, s.user_id, s.product_id, p.slug AS product_slug,
+                    s.plan, s.status, s.payment_provider,
+                    s.provider_subscription_id, s.provider_customer_id,
+                    s.seat_count, s.trial_end,
+                    s.current_period_start, s.current_period_end,
+                    s.created_at, s.updated_at
+             FROM subscriptions s
+             JOIN products p ON p.id = s.product_id
+             WHERE s.user_id = $1
+               AND s.status IN ('active','trialing','past_due')",
+            &[&user_id],
+        )
+        .await?;
+
+    Ok(rows.iter().map(row_to_subscription).collect())
+}
+
+/// Upsert a subscription row by provider subscription ID.
+///
+/// Used by Stripe and PayPal webhook handlers to keep the subscription
+/// table in sync with the payment provider's state (Phase 3).
+#[allow(dead_code)]
+pub async fn upsert_subscription_by_provider_id(
+    pool: &Pool,
+    provider_subscription_id: &str,
+    plan: &str,
+    status: &str,
+    seat_count: i16,
+    trial_end: Option<DateTime<Utc>>,
+    current_period_start: Option<DateTime<Utc>>,
+    current_period_end: Option<DateTime<Utc>>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET plan                  = $2,
+                 status                = $3,
+                 seat_count            = $4,
+                 trial_end             = $5,
+                 current_period_start  = $6,
+                 current_period_end    = $7,
+                 updated_at            = NOW()
+             WHERE provider_subscription_id = $1",
+            &[
+                &provider_subscription_id,
+                &plan,
+                &status,
+                &seat_count,
+                &trial_end,
+                &current_period_start,
+                &current_period_end,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Activate a new subscription after a successful checkout session (Phase 3).
+#[allow(dead_code)]
+pub async fn activate_subscription(
+    pool: &Pool,
+    user_id: Uuid,
+    product_slug: &str,
+    plan: &str,
+    payment_provider: &str,
+    provider_subscription_id: &str,
+    provider_customer_id: &str,
+    seat_count: i16,
+    trial_end: Option<DateTime<Utc>>,
+    current_period_start: Option<DateTime<Utc>>,
+    current_period_end: Option<DateTime<Utc>>,
+) -> Result<Subscription, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "INSERT INTO subscriptions
+                (user_id, product_id, plan, status, payment_provider,
+                 provider_subscription_id, provider_customer_id, seat_count,
+                 trial_end, current_period_start, current_period_end)
+             SELECT $1, p.id, $3, 'active', $4, $5, $6, $7, $8, $9, $10
+             FROM products p WHERE p.slug = $2
+             RETURNING id, user_id, product_id,
+                       (SELECT slug FROM products WHERE id = product_id) AS product_slug,
+                       plan, status, payment_provider,
+                       provider_subscription_id, provider_customer_id,
+                       seat_count, trial_end, current_period_start, current_period_end,
+                       created_at, updated_at",
+            &[
+                &user_id,
+                &product_slug,
+                &plan,
+                &payment_provider,
+                &provider_subscription_id,
+                &provider_customer_id,
+                &seat_count,
+                &trial_end,
+                &current_period_start,
+                &current_period_end,
+            ],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db_err) = e.as_db_error() {
+                if db_err.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+
+    Ok(row_to_subscription(&row))
+}
+
+/// Cancel a subscription by setting its status to 'cancelled' (Phase 3).
+#[allow(dead_code)]
+pub async fn cancel_subscription(
+    pool: &Pool,
+    provider_subscription_id: &str,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET status = 'cancelled', updated_at = NOW()
+             WHERE provider_subscription_id = $1",
+            &[&provider_subscription_id],
+        )
+        .await?;
+    Ok(())
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn row_to_user(row: &tokio_postgres::Row) -> User {
@@ -265,5 +441,25 @@ fn row_to_user(row: &tokio_postgres::Row) -> User {
         updated_at: row.get("updated_at"),
         confirmation_token: row.get("confirmation_token"),
         confirmation_token_expires_at: row.get("confirmation_token_expires_at"),
+    }
+}
+
+fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
+    Subscription {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        product_id: row.get("product_id"),
+        product_slug: row.get("product_slug"),
+        plan: row.get("plan"),
+        status: row.get("status"),
+        payment_provider: row.get("payment_provider"),
+        provider_subscription_id: row.get("provider_subscription_id"),
+        provider_customer_id: row.get("provider_customer_id"),
+        seat_count: row.get("seat_count"),
+        trial_end: row.get("trial_end"),
+        current_period_start: row.get("current_period_start"),
+        current_period_end: row.get("current_period_end"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     }
 }

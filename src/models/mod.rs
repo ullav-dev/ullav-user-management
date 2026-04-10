@@ -101,6 +101,72 @@ pub struct PasswordResetConfirm {
     pub new_password: String,
 }
 
+// ── Subscriptions ─────────────────────────────────────────────────────────────
+
+/// A subscription row as stored in the database.
+#[derive(Debug, Clone)]
+pub struct Subscription {
+    pub id: uuid::Uuid,
+    pub user_id: uuid::Uuid,
+    pub product_id: uuid::Uuid,
+    pub product_slug: String,
+    pub plan: String,
+    pub status: String,
+    pub payment_provider: Option<String>,
+    pub provider_subscription_id: Option<String>,
+    pub provider_customer_id: Option<String>,
+    pub seat_count: i16,
+    pub trial_end: Option<chrono::DateTime<chrono::Utc>>,
+    pub current_period_start: Option<chrono::DateTime<chrono::Utc>>,
+    pub current_period_end: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Public API response for a subscription.
+#[derive(Debug, Serialize)]
+pub struct SubscriptionResponse {
+    pub id: uuid::Uuid,
+    pub product: String,
+    pub plan: String,
+    pub status: String,
+    pub seat_count: i16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_end: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_period_start: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_period_end: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<Subscription> for SubscriptionResponse {
+    fn from(s: Subscription) -> Self {
+        Self {
+            id: s.id,
+            product: s.product_slug,
+            plan: s.plan,
+            status: s.status,
+            seat_count: s.seat_count,
+            trial_end: s.trial_end,
+            current_period_start: s.current_period_start,
+            current_period_end: s.current_period_end,
+            created_at: s.created_at,
+        }
+    }
+}
+
+/// Request body for initiating a checkout session.
+#[derive(Debug, Deserialize)]
+pub struct CheckoutRequest {
+    pub product: String,
+    pub plan: String,
+    /// Payment provider: "stripe" or "paypal".
+    pub provider: String,
+    /// Number of seats — only relevant for the Family/Team plan.
+    pub seat_count: Option<i16>,
+}
+
 /// A password-reset token row.
 #[derive(Debug, Clone)]
 pub struct PasswordResetToken {

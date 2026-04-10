@@ -278,8 +278,15 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::scope("")
                     .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone()))
-                    .service(handlers::auth::change_password),
+                    .service(handlers::auth::change_password)
+                    // Subscription management — any authenticated user
+                    .service(handlers::subscriptions::get_current_subscription)
+                    .service(handlers::subscriptions::create_checkout_session)
+                    .service(handlers::subscriptions::create_portal_session),
             )
+            // Webhook endpoints — no auth, provider-signed payloads
+            .service(handlers::subscriptions::stripe_webhook)
+            .service(handlers::subscriptions::paypal_webhook)
             // Admin only — requires `health:read` permission
             .service(
                 web::scope("")

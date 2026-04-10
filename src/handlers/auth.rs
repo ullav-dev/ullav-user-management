@@ -16,6 +16,7 @@ use crate::{
 use actix_web::{get, post, put, web, HttpMessage, HttpRequest, HttpResponse};
 use chrono::Utc;
 use deadpool_postgres::Pool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// `POST /auth/login` — Authenticate a user and return a JWT.
@@ -37,12 +38,14 @@ pub async fn login(
 
     let (roles, permissions) =
         db::get_user_roles_and_permissions(&state.pool, user.id).await?;
+    // Phase 4 will populate subscriptions from the DB here.
     let token = create_jwt(
         user.id,
         &state.jwt_secret,
         state.jwt_ttl_hours,
         roles.clone(),
         permissions.clone(),
+        HashMap::new(),
     )?;
     let response = LoginResponse {
         token,

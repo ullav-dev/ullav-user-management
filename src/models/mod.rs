@@ -167,6 +167,13 @@ pub struct CheckoutRequest {
     pub seat_count: Option<i16>,
 }
 
+/// Response from a successful checkout session creation.
+#[derive(Debug, Serialize)]
+pub struct CheckoutResponse {
+    /// URL to redirect the user to complete payment.
+    pub url: String,
+}
+
 /// A password-reset token row.
 #[derive(Debug, Clone)]
 pub struct PasswordResetToken {

@@ -1,7 +1,8 @@
 use crate::{
     db,
     errors::AppError,
-    models::{CheckoutRequest, SubscriptionResponse},
+    models::{CheckoutRequest, CheckoutResponse, SubscriptionResponse},
+    payments,
     utils::jwt::Claims,
     AppState,
 };
@@ -46,7 +47,6 @@ pub async fn get_current_subscription(
         // never need to special-case a 404.
         None => {
             use chrono::Utc;
-            use uuid::Uuid;
             SubscriptionResponse {
                 id: Uuid::nil(),
                 product: product_slug.clone(),
@@ -71,62 +71,221 @@ pub async fn get_current_subscription(
 ///
 /// Initiates a Stripe or PayPal checkout session for the requested plan.
 /// Returns a redirect URL to the hosted checkout page.
-///
-/// **Not yet implemented — Phase 3.**
 #[post("/subscriptions/checkout")]
 pub async fn create_checkout_session(
-    _state: web::Data<AppState>,
-    _req: HttpRequest,
-    _body: web::Json<CheckoutRequest>,
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<CheckoutRequest>,
 ) -> Result<HttpResponse, AppError> {
-    Ok(HttpResponse::NotImplemented().json(serde_json::json!({
-        "error": "Payment integration not yet implemented — coming in Phase 3"
-    })))
+    let claims = req
+        .extensions()
+        .get::<Claims>()
+        .ok_or(AppError::InvalidToken)?
+        .clone();
+
+    let user_id: Uuid = claims.sub.parse().map_err(|_| AppError::InvalidToken)?;
+    let user = db::get_user_by_id(&state.pool, user_id).await?;
+    let seat_count = body.seat_count.unwrap_or(1).max(1);
+
+    let success_url = format!("{}/subscription/success", state.clann_app_url);
+    let cancel_url = format!("{}/pricing", state.clann_app_url);
+
+    let url = match body.provider.as_str() {
+        "stripe" => {
+            let config = state
+                .stripe
+                .as_ref()
+                .ok_or_else(|| AppError::PaymentProvider("Stripe is not configured".into()))?;
+            payments::stripe::create_checkout_session(
+                config,
+                &state.http_client,
+                user_id,
+                &user.email,
+                &body.plan,
+                seat_count,
+                &success_url,
+                &cancel_url,
+            )
+            .await?
+        }
+        "paypal" => {
+            let config = state
+                .paypal
+                .as_ref()
+                .ok_or_else(|| AppError::PaymentProvider("PayPal is not configured".into()))?;
+            payments::paypal::create_subscription(
+                config,
+                &state.http_client,
+                user_id,
+                &user.email,
+                &body.plan,
+                seat_count,
+                &success_url,
+                &cancel_url,
+            )
+            .await?
+        }
+        other => {
+            return Err(AppError::Validation(format!(
+                "Unknown payment provider '{other}'. Use 'stripe' or 'paypal'."
+            )));
+        }
+    };
+
+    Ok(HttpResponse::Ok().json(CheckoutResponse { url }))
 }
 
 /// `POST /subscriptions/portal`
 ///
 /// Creates a Stripe Customer Portal session so the user can manage their
 /// billing details, change plan, or cancel.
-///
-/// **Not yet implemented — Phase 3.**
 #[post("/subscriptions/portal")]
 pub async fn create_portal_session(
-    _state: web::Data<AppState>,
-    _req: HttpRequest,
+    state: web::Data<AppState>,
+    req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
-    Ok(HttpResponse::NotImplemented().json(serde_json::json!({
-        "error": "Billing portal not yet implemented — coming in Phase 3"
-    })))
+    let claims = req
+        .extensions()
+        .get::<Claims>()
+        .ok_or(AppError::InvalidToken)?
+        .clone();
+
+    let user_id: Uuid = claims.sub.parse().map_err(|_| AppError::InvalidToken)?;
+
+    let config = state
+        .stripe
+        .as_ref()
+        .ok_or_else(|| AppError::PaymentProvider("Stripe is not configured".into()))?;
+
+    // Find the user's Stripe subscription to retrieve the customer_id.
+    // We look across all products — the portal manages all of the user's billing.
+    let subscriptions = db::get_all_user_subscriptions(&state.pool, user_id).await?;
+    let stripe_sub = subscriptions
+        .iter()
+        .find(|s| s.payment_provider.as_deref() == Some("stripe"))
+        .ok_or_else(|| AppError::NotFound)?;
+
+    let customer_id = stripe_sub
+        .provider_customer_id
+        .as_deref()
+        .ok_or_else(|| AppError::PaymentProvider("No Stripe customer ID on record".into()))?;
+
+    let return_url = format!("{}/account", state.clann_app_url);
+
+    let url = payments::stripe::create_portal_session(
+        config,
+        &state.http_client,
+        customer_id,
+        &return_url,
+    )
+    .await?;
+
+    Ok(HttpResponse::Ok().json(CheckoutResponse { url }))
 }
 
-// ── Webhook stubs ─────────────────────────────────────────────────────────────
-// Webhook endpoints must return 2xx immediately; providers will retry on
-// failure.  These stubs acknowledge receipt and log the raw payload so we can
-// inspect events during development without losing them.
+// ── Webhook handlers ──────────────────────────────────────────────────────────
 
 /// `POST /webhooks/stripe`
 ///
-/// Receives and acknowledges Stripe lifecycle events.
-/// Signature verification and event processing are implemented in Phase 3.
+/// Receives Stripe lifecycle events, verifies the signature, and dispatches
+/// to the appropriate handler.
 #[post("/webhooks/stripe")]
-pub async fn stripe_webhook(body: web::Bytes) -> HttpResponse {
-    log::info!(
-        "Stripe webhook received ({} bytes) — processing not yet implemented",
-        body.len()
-    );
-    HttpResponse::Ok().finish()
+pub async fn stripe_webhook(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Bytes,
+) -> HttpResponse {
+    let config = match &state.stripe {
+        Some(c) => c,
+        None => {
+            log::warn!("Stripe webhook received but Stripe is not configured — ignoring");
+            return HttpResponse::Ok().finish();
+        }
+    };
+
+    let signature = req
+        .headers()
+        .get("Stripe-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    if let Err(e) = payments::stripe::verify_signature(&body, signature, &config.webhook_secret) {
+        log::warn!("Stripe webhook signature verification failed: {e}");
+        return HttpResponse::Unauthorized().finish();
+    }
+
+    match payments::stripe::handle_event(&state, &body).await {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(e) => {
+            log::error!("Stripe webhook handler error: {e}");
+            // Return 500 so Stripe will retry the event.
+            HttpResponse::InternalServerError().finish()
+        }
+    }
 }
 
 /// `POST /webhooks/paypal`
 ///
-/// Receives and acknowledges PayPal lifecycle events.
-/// Signature verification and event processing are implemented in Phase 3.
+/// Receives PayPal lifecycle events, verifies the signature via PayPal's
+/// verification API, and dispatches to the appropriate handler.
 #[post("/webhooks/paypal")]
-pub async fn paypal_webhook(body: web::Bytes) -> HttpResponse {
-    log::info!(
-        "PayPal webhook received ({} bytes) — processing not yet implemented",
-        body.len()
-    );
-    HttpResponse::Ok().finish()
+pub async fn paypal_webhook(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Bytes,
+) -> HttpResponse {
+    let config = match &state.paypal {
+        Some(c) => c,
+        None => {
+            log::warn!("PayPal webhook received but PayPal is not configured — ignoring");
+            return HttpResponse::Ok().finish();
+        }
+    };
+
+    // PayPal sends verification metadata in headers.
+    let get_header = |name: &str| -> String {
+        req.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    let transmission_id = get_header("PAYPAL-TRANSMISSION-ID");
+    let transmission_time = get_header("PAYPAL-TRANSMISSION-TIME");
+    let cert_url = get_header("PAYPAL-CERT-URL");
+    let auth_algo = get_header("PAYPAL-AUTH-ALGO");
+    let transmission_sig = get_header("PAYPAL-TRANSMISSION-SIG");
+
+    let event: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("PayPal webhook: invalid JSON body: {e}");
+            return HttpResponse::BadRequest().finish();
+        }
+    };
+
+    if let Err(e) = payments::paypal::verify_signature(
+        config,
+        &state.http_client,
+        &transmission_id,
+        &transmission_time,
+        &cert_url,
+        &auth_algo,
+        &transmission_sig,
+        &event,
+    )
+    .await
+    {
+        log::warn!("PayPal webhook signature verification failed: {e}");
+        return HttpResponse::Unauthorized().finish();
+    }
+
+    match payments::paypal::handle_event(&state, &event).await {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(e) => {
+            log::error!("PayPal webhook handler error: {e}");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
 }

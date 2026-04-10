@@ -428,6 +428,55 @@ pub async fn cancel_subscription(
     Ok(())
 }
 
+/// Update only the status of a subscription (e.g. active → past_due).
+pub async fn set_subscription_status(
+    pool: &Pool,
+    provider_subscription_id: &str,
+    status: &str,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET status = $2, updated_at = NOW()
+             WHERE provider_subscription_id = $1",
+            &[&provider_subscription_id, &status],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Sync status and billing period from a provider subscription update event.
+pub async fn update_subscription_period(
+    pool: &Pool,
+    provider_subscription_id: &str,
+    status: &str,
+    trial_end: Option<DateTime<Utc>>,
+    current_period_start: Option<DateTime<Utc>>,
+    current_period_end: Option<DateTime<Utc>>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET status               = $2,
+                 trial_end            = $3,
+                 current_period_start = $4,
+                 current_period_end   = $5,
+                 updated_at           = NOW()
+             WHERE provider_subscription_id = $1",
+            &[
+                &provider_subscription_id,
+                &status,
+                &trial_end,
+                &current_period_start,
+                &current_period_end,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn row_to_user(row: &tokio_postgres::Row) -> User {

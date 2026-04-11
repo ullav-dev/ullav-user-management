@@ -77,6 +77,8 @@ psql "$DATABASE_URL" -f migrations/004_collection_permissions.sql
 psql "$DATABASE_URL" -f migrations/005_products.sql
 psql "$DATABASE_URL" -f migrations/006_subscriptions.sql
 psql "$DATABASE_URL" -f migrations/007_grandfather_subscriptions.sql
+psql "$DATABASE_URL" -f migrations/008_admin_user_permissions.sql
+psql "$DATABASE_URL" -f migrations/009_comad_product.sql
 cargo run
 ```
 
@@ -92,7 +94,16 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
 - `src/db/mod.rs` — all raw SQL queries (no ORM); returns `AppError` on failure
 - `src/handlers/users.rs` — `POST /users` (open; assigns `user` role on creation; accepts optional `app_url` for multi-tenant confirmation links)
 - `src/handlers/auth.rs` — `POST /auth/login`, `PUT /users/{id}/password` (JWT-protected), `POST /auth/password-reset/request` (accepts optional `app_url`), `POST /auth/password-reset/confirm` (also activates the user if not yet confirmed — password reset proves email ownership), `POST /auth/confirm-email`, `GET /auth/confirm-email` (link-click activation)
-- `src/handlers/health.rs` — `GET /health` (admin-only; requires `health:read` permission)
+- `src/handlers/health.rs` — `GET /health` (requires `health:read` permission); also exposes `health_scoped` (`GET ""`) mounted at `/health` inside the auth scope
+- `src/handlers/admin.rs` — full CRUD for user/role/permission/subscription/product management; all routes require `users:read` permission and are mounted under the `/admin` scope prefix:
+  - `GET /admin/users`, `GET /admin/users/{id}`, `PATCH /admin/users/{id}`, `DELETE /admin/users/{id}`
+  - `POST /admin/users/{id}/roles/{role}`, `DELETE /admin/users/{id}/roles/{role}`
+  - `POST /admin/users/{id}/subscriptions`
+  - `GET /admin/roles`, `POST /admin/roles`, `DELETE /admin/roles/{name}`
+  - `GET /admin/permissions`, `POST /admin/permissions`
+  - `POST /admin/roles/{name}/permissions/{perm}`, `DELETE /admin/roles/{name}/permissions/{perm}`
+  - `GET /admin/subscriptions`, `PATCH /admin/subscriptions/{id}`, `DELETE /admin/subscriptions/{id}`
+  - `GET /admin/products`
 - `src/handlers/subscriptions.rs` — `GET /subscriptions/current?product=<slug>` (JWT-protected; returns Individual free tier when no row exists), `POST /subscriptions/checkout` (JWT-protected; initiates Stripe or PayPal checkout), `POST /subscriptions/portal` (JWT-protected; Stripe Customer Portal), `POST /webhooks/stripe`, `POST /webhooks/paypal` (signature-verified webhook receivers)
 - `src/handlers/docs.rs` — `GET /openapi.yaml`, `GET /openapi.json` (YAML spec embedded via `include_str!`, converted to JSON with `serde_yaml`), `GET /docs` (Swagger UI via CDN); all three disabled when `ENABLE_DOCS=false`
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
@@ -107,13 +118,15 @@ Middleware is registered in this order (innermost → outermost, i.e. outermost 
 - `src/utils/password.rs` — Argon2id hashing, verification, validation, and secure token generation
 - `src/tests.rs` — unit tests for password utils, JWT helpers, `resolve_secret`, `resolve_app_url`, and handler smoke tests using `actix_web::test` (no real DB needed)
 
+**Route structure:** All JWT-protected routes live inside a single `web::scope("")` with `AuthMiddleware::new`. Routes with stricter permission requirements use **nested scopes with concrete path prefixes** (e.g. `web::scope("/admin")` wrapping `AuthMiddleware::require("users:read")`). Do NOT use multiple top-level `web::scope("")` blocks for different permission levels — actix-web commits to the first matching scope and will return 404 rather than falling through, so all overlapping-prefix scopes must be nested.
+
 **Data flow:** handlers call `db::*` functions directly (no service layer). All DB functions take `&Pool` and return `Result<T, AppError>`. The `AppError` enum converts into JSON `{ "error": "..." }` responses automatically.
 
 **Database:** PostgreSQL only, native SQL via `tokio-postgres`. Schema is in `migrations/001_initial.sql`; email-confirmation columns are added by `migrations/002_email_confirmation.sql`; RBAC tables (`roles`, `permissions`, `role_permissions`, `user_roles`) and seed data are in `migrations/003_rbac.sql`; collection-server roles/permissions (`collection_admin`, `curator`, `registrar`) are in `migrations/004_collection_permissions.sql`; subscription tables (`products`, `subscriptions`, `subscription_seats`) are in `migrations/005_products.sql` and `migrations/006_subscriptions.sql`; existing users are grandfathered into the Individual (free) plan by `migrations/007_grandfather_subscriptions.sql`. In production, all migrations are applied automatically by the `migrate` service. In dev Docker Compose, `001_initial.sql` runs automatically; the rest must be applied manually.
 
 **JWT:** Tokens carry `{ sub, iat, exp, roles, permissions }` claims where `sub` is the user UUID as a string. `AuthMiddleware` validates Bearer tokens and injects `Claims` into request extensions. `PUT /users/{id}/password` requires a valid JWT (ownership or `users:change_any_password` permission). `GET /health` requires the `health:read` permission (admin only).
 
-**RBAC:** Seeded roles: `admin` (has `health:read`, `users:change_any_password`, and all collection permissions), `user` (no permissions), `collection_admin`, `curator`, `registrar` (see `migrations/004_collection_permissions.sql` for permission sets). New users are automatically assigned the `user` role on registration. Promote a user by inserting a row into `user_roles`.
+**RBAC:** Seeded roles: `admin` (has `health:read`, `users:change_any_password`, `users:read`, `users:write`, and all collection permissions), `user` (no permissions), `collection_admin`, `curator`, `registrar` (see `migrations/004_collection_permissions.sql` for permission sets). New users are automatically assigned the `user` role on registration. Promote a user by inserting a row into `user_roles`. Migration `008_admin_user_permissions.sql` adds `users:read` and `users:write` permissions and grants them to the `admin` role. Migration `009_comad_product.sql` seeds the `comad` product.
 
 ## Configuration
 

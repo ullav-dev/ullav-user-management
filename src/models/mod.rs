@@ -2,6 +2,116 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+// ── Admin models ──────────────────────────────────────────────────────────────
+
+/// User with their assigned roles — returned by admin endpoints.
+#[derive(Debug, Clone, Serialize)]
+pub struct UserWithRoles {
+    pub id: Uuid,
+    pub email: String,
+    pub username: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub roles: Vec<String>,
+}
+
+/// Paginated list of users.
+#[derive(Debug, Serialize)]
+pub struct UsersPage {
+    pub users: Vec<UserWithRoles>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// Admin request body for partial update of a user.
+#[derive(Debug, Deserialize)]
+pub struct AdminUpdateUserRequest {
+    pub email: Option<String>,
+    pub username: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+/// A role together with its granted permission names.
+#[derive(Debug, Serialize)]
+pub struct RoleWithPermissions {
+    pub name: String,
+    pub permissions: Vec<String>,
+}
+
+/// Request body for creating a new role.
+#[derive(Debug, Deserialize)]
+pub struct CreateRoleRequest {
+    pub name: String,
+}
+
+/// Request body for creating a new permission.
+#[derive(Debug, Deserialize)]
+pub struct CreatePermissionRequest {
+    pub name: String,
+}
+
+/// A subscription row joined with its user and product — used in admin responses.
+#[derive(Debug, Serialize)]
+pub struct AdminSubscription {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub username: String,
+    pub email: String,
+    pub product: String,
+    pub product_name: String,
+    pub plan: String,
+    pub status: String,
+    pub seat_count: i16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_end: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_period_start: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_period_end: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Paginated list of subscriptions.
+#[derive(Debug, Serialize)]
+pub struct SubscriptionsPage {
+    pub subscriptions: Vec<AdminSubscription>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// Admin request body for partial update of a subscription.
+#[derive(Debug, Deserialize)]
+pub struct AdminUpdateSubscriptionRequest {
+    pub plan: Option<String>,
+    pub status: Option<String>,
+    pub seat_count: Option<i16>,
+}
+
+/// Admin request body for creating a subscription.
+#[derive(Debug, Deserialize)]
+pub struct AdminCreateSubscriptionRequest {
+    pub product_slug: String,
+    pub plan: String,
+    #[serde(default = "default_status")]
+    pub status: String,
+    #[serde(default = "default_seat_count")]
+    pub seat_count: i16,
+}
+
+fn default_status() -> String { "active".into() }
+fn default_seat_count() -> i16 { 1 }
+
+/// A product row as returned by admin endpoints.
+#[derive(Debug, Serialize)]
+pub struct ProductResponse {
+    pub slug: String,
+    pub name: String,
+}
+
 /// A user account stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {

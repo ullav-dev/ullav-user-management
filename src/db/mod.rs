@@ -1,5 +1,8 @@
 use crate::errors::AppError;
-use crate::models::{PasswordResetToken, Subscription, User};
+use crate::models::{
+    AdminSubscription, PasswordResetToken, ProductResponse, RoleWithPermissions, Subscription,
+    SubscriptionsPage, User, UserWithRoles, UsersPage,
+};
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
@@ -503,6 +506,446 @@ fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
         payment_provider: row.get("payment_provider"),
         provider_subscription_id: row.get("provider_subscription_id"),
         provider_customer_id: row.get("provider_customer_id"),
+        seat_count: row.get("seat_count"),
+        trial_end: row.get("trial_end"),
+        current_period_start: row.get("current_period_start"),
+        current_period_end: row.get("current_period_end"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_user_with_roles(row: &tokio_postgres::Row) -> UserWithRoles {
+    UserWithRoles {
+        id: row.get("id"),
+        email: row.get("email"),
+        username: row.get("username"),
+        is_active: row.get("is_active"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        roles: row.get("roles"),
+    }
+}
+
+// ── Admin functions ───────────────────────────────────────────────────────────
+
+/// List users with optional search, ordered by created_at DESC.
+///
+/// Returns `(users, total_count)`.
+pub async fn list_users_paginated(
+    pool: &Pool,
+    page: i64,
+    page_size: i64,
+    search: &str,
+) -> Result<UsersPage, AppError> {
+    let client = pool.get().await?;
+    let offset = (page - 1) * page_size;
+
+    let (total_row, rows) = if search.is_empty() {
+        let total = client
+            .query_one("SELECT COUNT(*) FROM users", &[])
+            .await?;
+        let rows = client
+            .query(
+                "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+                        COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
+                 FROM users u
+                 LEFT JOIN user_roles ur ON ur.user_id = u.id
+                 LEFT JOIN roles r ON r.id = ur.role_id
+                 GROUP BY u.id
+                 ORDER BY u.created_at DESC
+                 LIMIT $1 OFFSET $2",
+                &[&page_size, &offset],
+            )
+            .await?;
+        (total, rows)
+    } else {
+        let pattern = format!("%{}%", search.to_lowercase());
+        let total = client
+            .query_one(
+                "SELECT COUNT(*) FROM users WHERE LOWER(username) LIKE $1 OR LOWER(email) LIKE $1",
+                &[&pattern],
+            )
+            .await?;
+        let rows = client
+            .query(
+                "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+                        COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
+                 FROM users u
+                 LEFT JOIN user_roles ur ON ur.user_id = u.id
+                 LEFT JOIN roles r ON r.id = ur.role_id
+                 WHERE LOWER(u.username) LIKE $1 OR LOWER(u.email) LIKE $1
+                 GROUP BY u.id
+                 ORDER BY u.created_at DESC
+                 LIMIT $2 OFFSET $3",
+                &[&pattern, &page_size, &offset],
+            )
+            .await?;
+        (total, rows)
+    };
+
+    let total: i64 = total_row.get(0);
+    let users = rows.iter().map(row_to_user_with_roles).collect();
+    Ok(UsersPage { users, total, page, page_size })
+}
+
+/// Fetch a single user with their roles.
+pub async fn get_user_with_roles(pool: &Pool, id: Uuid) -> Result<UserWithRoles, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+                    COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
+             FROM users u
+             LEFT JOIN user_roles ur ON ur.user_id = u.id
+             LEFT JOIN roles r ON r.id = ur.role_id
+             WHERE u.id = $1
+             GROUP BY u.id",
+            &[&id],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(row_to_user_with_roles(&row))
+}
+
+/// Partially update a user's profile. NULL params leave the column unchanged.
+pub async fn admin_update_user(
+    pool: &Pool,
+    id: Uuid,
+    email: Option<&str>,
+    username: Option<&str>,
+    is_active: Option<bool>,
+) -> Result<UserWithRoles, AppError> {
+    let client = pool.get().await?;
+    let updated = client
+        .execute(
+            "UPDATE users SET
+               email     = COALESCE($1, email),
+               username  = COALESCE($2, username),
+               is_active = COALESCE($3, is_active),
+               updated_at = NOW()
+             WHERE id = $4",
+            &[&email, &username, &is_active, &id],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(AppError::NotFound);
+    }
+    get_user_with_roles(pool, id).await
+}
+
+/// Delete a user by ID. Returns NotFound if the user does not exist.
+pub async fn admin_delete_user(pool: &Pool, id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute("DELETE FROM users WHERE id = $1", &[&id])
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Remove a named role from a user (no-op if the role is not assigned).
+pub async fn remove_role(pool: &Pool, user_id: Uuid, role_name: &str) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "DELETE FROM user_roles
+             WHERE user_id = $1
+               AND role_id = (SELECT id FROM roles WHERE name = $2)",
+            &[&user_id, &role_name],
+        )
+        .await?;
+    Ok(())
+}
+
+/// List all role names defined in the system.
+pub async fn list_all_roles(pool: &Pool) -> Result<Vec<String>, AppError> {
+    let client = pool.get().await?;
+    let rows = client.query("SELECT name FROM roles ORDER BY name", &[]).await?;
+    Ok(rows.iter().map(|r| r.get("name")).collect())
+}
+
+// ── Role & permission management ──────────────────────────────────────────────
+
+/// List all roles together with their granted permissions.
+pub async fn list_roles_with_permissions(pool: &Pool) -> Result<Vec<RoleWithPermissions>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT r.name,
+                    COALESCE(array_agg(p.name ORDER BY p.name) FILTER (WHERE p.name IS NOT NULL), ARRAY[]::text[]) AS permissions
+             FROM roles r
+             LEFT JOIN role_permissions rp ON rp.role_id = r.id
+             LEFT JOIN permissions p ON p.id = rp.permission_id
+             GROUP BY r.name
+             ORDER BY r.name",
+            &[],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| RoleWithPermissions {
+            name: row.get("name"),
+            permissions: row.get("permissions"),
+        })
+        .collect())
+}
+
+/// List all permission names defined in the system.
+pub async fn list_all_permissions(pool: &Pool) -> Result<Vec<String>, AppError> {
+    let client = pool.get().await?;
+    let rows = client.query("SELECT name FROM permissions ORDER BY name", &[]).await?;
+    Ok(rows.iter().map(|r| r.get("name")).collect())
+}
+
+/// Create a new role. Returns Conflict if the name already exists.
+pub async fn create_role(pool: &Pool, name: &str) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute("INSERT INTO roles (name) VALUES ($1)", &[&name])
+        .await
+        .map_err(|e| {
+            if let Some(db) = e.as_db_error() {
+                if db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+    Ok(())
+}
+
+/// Delete a role by name.
+pub async fn delete_role(pool: &Pool, name: &str) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute("DELETE FROM roles WHERE name = $1", &[&name])
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Create a new permission. No-op if already exists.
+pub async fn create_permission(pool: &Pool, name: &str) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO permissions (name) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&name],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Grant a permission to a role (no-op if already granted).
+pub async fn add_permission_to_role(pool: &Pool, role: &str, permission: &str) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let affected = client
+        .execute(
+            "INSERT INTO role_permissions (role_id, permission_id)
+             SELECT r.id, p.id FROM roles r, permissions p
+             WHERE r.name = $1 AND p.name = $2
+             ON CONFLICT DO NOTHING",
+            &[&role, &permission],
+        )
+        .await?;
+    if affected == 0 {
+        // Role or permission not found
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Revoke a permission from a role.
+pub async fn remove_permission_from_role(pool: &Pool, role: &str, permission: &str) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "DELETE FROM role_permissions
+             WHERE role_id       = (SELECT id FROM roles       WHERE name = $1)
+               AND permission_id = (SELECT id FROM permissions WHERE name = $2)",
+            &[&role, &permission],
+        )
+        .await?;
+    Ok(())
+}
+
+// ── Subscription management ───────────────────────────────────────────────────
+
+/// List all subscriptions across all users with optional search and product filter.
+pub async fn list_subscriptions_paginated(
+    pool: &Pool,
+    page: i64,
+    page_size: i64,
+    search: &str,
+    product: &str,
+) -> Result<SubscriptionsPage, AppError> {
+    let client = pool.get().await?;
+    let offset = (page - 1) * page_size;
+
+    // Build WHERE clauses dynamically based on filters.
+    // We use a single-branch approach: always include both filters, treating
+    // empty strings as "match all".
+    let search_pattern = if search.is_empty() {
+        "%".to_string()
+    } else {
+        format!("%{}%", search.to_lowercase())
+    };
+    let product_pattern = if product.is_empty() {
+        "%".to_string()
+    } else {
+        product.to_string()
+    };
+
+    let total_row = client
+        .query_one(
+            "SELECT COUNT(*) FROM subscriptions s
+             JOIN users    u ON u.id = s.user_id
+             JOIN products p ON p.id = s.product_id
+             WHERE (LOWER(u.username) LIKE $1 OR LOWER(u.email) LIKE $1)
+               AND ($2 = '%' OR p.slug = $2)",
+            &[&search_pattern, &product_pattern],
+        )
+        .await?;
+    let total: i64 = total_row.get(0);
+
+    let rows = client
+        .query(
+            "SELECT s.id, s.user_id, u.username, u.email,
+                    p.slug AS product, p.name AS product_name,
+                    s.plan, s.status, s.seat_count,
+                    s.trial_end, s.current_period_start, s.current_period_end,
+                    s.created_at, s.updated_at
+             FROM subscriptions s
+             JOIN users    u ON u.id = s.user_id
+             JOIN products p ON p.id = s.product_id
+             WHERE (LOWER(u.username) LIKE $1 OR LOWER(u.email) LIKE $1)
+               AND ($2 = '%' OR p.slug = $2)
+             ORDER BY s.created_at DESC
+             LIMIT $3 OFFSET $4",
+            &[&search_pattern, &product_pattern, &page_size, &offset],
+        )
+        .await?;
+
+    let subscriptions = rows.iter().map(row_to_admin_subscription).collect();
+    Ok(SubscriptionsPage { subscriptions, total, page, page_size })
+}
+
+/// Fetch a single subscription by ID.
+pub async fn admin_get_subscription(pool: &Pool, id: Uuid) -> Result<AdminSubscription, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT s.id, s.user_id, u.username, u.email,
+                    p.slug AS product, p.name AS product_name,
+                    s.plan, s.status, s.seat_count,
+                    s.trial_end, s.current_period_start, s.current_period_end,
+                    s.created_at, s.updated_at
+             FROM subscriptions s
+             JOIN users    u ON u.id = s.user_id
+             JOIN products p ON p.id = s.product_id
+             WHERE s.id = $1",
+            &[&id],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(row_to_admin_subscription(&row))
+}
+
+/// Partially update a subscription's plan, status, or seat count.
+pub async fn admin_update_subscription(
+    pool: &Pool,
+    id: Uuid,
+    plan: Option<&str>,
+    status: Option<&str>,
+    seat_count: Option<i16>,
+) -> Result<AdminSubscription, AppError> {
+    let client = pool.get().await?;
+    let updated = client
+        .execute(
+            "UPDATE subscriptions SET
+               plan       = COALESCE($1, plan),
+               status     = COALESCE($2, status),
+               seat_count = COALESCE($3, seat_count),
+               updated_at = NOW()
+             WHERE id = $4",
+            &[&plan, &status, &seat_count, &id],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(AppError::NotFound);
+    }
+    admin_get_subscription(pool, id).await
+}
+
+/// Create a new subscription for a user.
+pub async fn admin_create_subscription(
+    pool: &Pool,
+    user_id: Uuid,
+    product_slug: &str,
+    plan: &str,
+    status: &str,
+    seat_count: i16,
+) -> Result<AdminSubscription, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "INSERT INTO subscriptions (user_id, product_id, plan, status, seat_count)
+             SELECT $1, p.id, $3, $4, $5 FROM products p WHERE p.slug = $2
+             RETURNING id",
+            &[&user_id, &product_slug, &plan, &status, &seat_count],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db) = e.as_db_error() {
+                if db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+    let new_id: Uuid = row.get("id");
+    admin_get_subscription(pool, new_id).await
+}
+
+/// Delete a subscription by ID.
+pub async fn admin_delete_subscription(pool: &Pool, id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute("DELETE FROM subscriptions WHERE id = $1", &[&id])
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// List all products.
+pub async fn list_products(pool: &Pool) -> Result<Vec<ProductResponse>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query("SELECT slug, name FROM products ORDER BY name", &[])
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| ProductResponse { slug: r.get("slug"), name: r.get("name") })
+        .collect())
+}
+
+fn row_to_admin_subscription(row: &tokio_postgres::Row) -> AdminSubscription {
+    AdminSubscription {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        username: row.get("username"),
+        email: row.get("email"),
+        product: row.get("product"),
+        product_name: row.get("product_name"),
+        plan: row.get("plan"),
+        status: row.get("status"),
         seat_count: row.get("seat_count"),
         trial_end: row.get("trial_end"),
         current_period_start: row.get("current_period_start"),

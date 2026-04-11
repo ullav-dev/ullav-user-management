@@ -307,28 +307,59 @@ async fn main() -> std::io::Result<()> {
         }
 
         app
-            // JWT required — ownership/permission checked in handler
+            // JWT required — all protected routes in one scope to avoid prefix-matching conflicts.
+            // Per-route permission enforcement is handled by nested scopes with path prefixes.
             .service(
                 web::scope("")
                     .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone()))
+                    // Any authenticated user
                     .service(handlers::auth::change_password)
-                    // Subscription management — any authenticated user
                     .service(handlers::subscriptions::get_current_subscription)
                     .service(handlers::subscriptions::create_checkout_session)
-                    .service(handlers::subscriptions::create_portal_session),
+                    .service(handlers::subscriptions::create_portal_session)
+                    // Health — requires `health:read`; use /health prefix to isolate
+                    .service(
+                        web::scope("/health")
+                            .wrap(middleware::auth::AuthMiddleware::require(
+                                jwt_secret.clone(),
+                                "health:read",
+                            ))
+                            .service(handlers::health::health_scoped),
+                    )
+                    // Admin user/role/subscription management — requires `users:read`
+                    .service(
+                        web::scope("/admin")
+                            .wrap(middleware::auth::AuthMiddleware::require(
+                                jwt_secret.clone(),
+                                "users:read",
+                            ))
+                            // Users
+                            .service(handlers::admin::list_users)
+                            .service(handlers::admin::get_user)
+                            .service(handlers::admin::update_user)
+                            .service(handlers::admin::delete_user)
+                            .service(handlers::admin::add_user_role)
+                            .service(handlers::admin::remove_user_role)
+                            .service(handlers::admin::create_user_subscription)
+                            // Roles & permissions
+                            .service(handlers::admin::list_roles)
+                            .service(handlers::admin::create_role)
+                            .service(handlers::admin::delete_role)
+                            .service(handlers::admin::list_permissions)
+                            .service(handlers::admin::create_permission)
+                            .service(handlers::admin::add_role_permission)
+                            .service(handlers::admin::remove_role_permission)
+                            // Subscriptions
+                            .service(handlers::admin::list_subscriptions)
+                            .service(handlers::admin::update_subscription)
+                            .service(handlers::admin::delete_subscription)
+                            // Products
+                            .service(handlers::admin::list_products),
+                    ),
             )
             // Webhook endpoints — no auth, provider-signed payloads
             .service(handlers::subscriptions::stripe_webhook)
             .service(handlers::subscriptions::paypal_webhook)
-            // Admin only — requires `health:read` permission
-            .service(
-                web::scope("")
-                    .wrap(middleware::auth::AuthMiddleware::require(
-                        jwt_secret.clone(),
-                        "health:read",
-                    ))
-                    .service(handlers::health::health),
-            )
     })
     .bind((host.as_str(), port))?
     .run()

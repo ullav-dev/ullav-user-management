@@ -252,7 +252,7 @@ Two roles are seeded at migration time:
 
 | Role | Permissions |
 |------|-------------|
-| `admin` | `health:read`, `users:change_any_password` |
+| `admin` | `health:read`, `users:change_any_password`, `users:read`, `users:write`, and all collection permissions |
 | `user` | _(none)_ |
 
 Every new user is automatically assigned the `user` role. To promote a user to admin, insert a row into `user_roles`:
@@ -293,7 +293,9 @@ The API will be available at `http://localhost:8081`.
 >   -f migrations/004_collection_permissions.sql \
 >   -f migrations/005_products.sql \
 >   -f migrations/006_subscriptions.sql \
->   -f migrations/007_grandfather_subscriptions.sql
+>   -f migrations/007_grandfather_subscriptions.sql \
+>   -f migrations/008_admin_user_permissions.sql \
+>   -f migrations/009_comad_product.sql
 > ```
 
 ### Production deployment
@@ -351,6 +353,8 @@ psql "$DATABASE_URL" -f migrations/004_collection_permissions.sql
 psql "$DATABASE_URL" -f migrations/005_products.sql
 psql "$DATABASE_URL" -f migrations/006_subscriptions.sql
 psql "$DATABASE_URL" -f migrations/007_grandfather_subscriptions.sql
+psql "$DATABASE_URL" -f migrations/008_admin_user_permissions.sql
+psql "$DATABASE_URL" -f migrations/009_comad_product.sql
 
 # 3. Run
 cargo run

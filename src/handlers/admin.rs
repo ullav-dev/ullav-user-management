@@ -3,7 +3,7 @@ use crate::{
     errors::AppError,
     models::{
         AdminCreateSubscriptionRequest, AdminUpdateSubscriptionRequest, AdminUpdateUserRequest,
-        CreatePermissionRequest, CreateRoleRequest,
+        CreatePermissionRequest, CreatePlanRequest, CreateRoleRequest,
     },
     AppState,
 };
@@ -21,7 +21,14 @@ pub struct UsersQuery {
     pub page_size: i64,
     #[serde(default)]
     pub search: String,
+    #[serde(default = "default_sort_by")]
+    pub sort_by: String,
+    #[serde(default = "default_sort_dir")]
+    pub sort_dir: String,
 }
+
+fn default_sort_by() -> String { "created_at".to_string() }
+fn default_sort_dir() -> String { "desc".to_string() }
 
 #[derive(Debug, Deserialize)]
 pub struct SubscriptionsQuery {
@@ -31,6 +38,12 @@ pub struct SubscriptionsQuery {
     pub page_size: i64,
     #[serde(default)]
     pub search: String,
+    #[serde(default)]
+    pub product: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlansQuery {
     #[serde(default)]
     pub product: String,
 }
@@ -48,7 +61,7 @@ pub async fn list_users(
 ) -> Result<HttpResponse, AppError> {
     let page = query.page.max(1);
     let page_size = query.page_size.clamp(1, 100);
-    let result = db::list_users_paginated(&state.pool, page, page_size, &query.search).await?;
+    let result = db::list_users_paginated(&state.pool, page, page_size, &query.search, &query.sort_by, &query.sort_dir).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -263,4 +276,42 @@ pub async fn list_products(
 ) -> Result<HttpResponse, AppError> {
     let products = db::list_products(&state.pool).await?;
     Ok(HttpResponse::Ok().json(products))
+}
+
+// ── Plans ─────────────────────────────────────────────────────────────────────
+
+/// `GET /admin/plans?product=<slug>` — list plans, optionally filtered by product slug.
+#[get("/plans")]
+pub async fn list_plans(
+    state: web::Data<AppState>,
+    query: web::Query<PlansQuery>,
+) -> Result<HttpResponse, AppError> {
+    let plans = db::list_plans(&state.pool, &query.product).await?;
+    Ok(HttpResponse::Ok().json(plans))
+}
+
+/// `POST /admin/plans` — create a new plan for a product.
+#[post("/plans")]
+pub async fn create_plan(
+    state: web::Data<AppState>,
+    body: web::Json<CreatePlanRequest>,
+) -> Result<HttpResponse, AppError> {
+    if body.slug.trim().is_empty() {
+        return Err(AppError::Validation("plan slug must not be empty".into()));
+    }
+    if body.name.trim().is_empty() {
+        return Err(AppError::Validation("plan name must not be empty".into()));
+    }
+    let plan = db::create_plan(&state.pool, &body.product_slug, body.slug.trim(), body.name.trim()).await?;
+    Ok(HttpResponse::Created().json(plan))
+}
+
+/// `DELETE /admin/plans/{id}` — delete a plan by ID.
+#[delete("/plans/{id}")]
+pub async fn delete_plan(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    db::delete_plan(&state.pool, *path).await?;
+    Ok(HttpResponse::NoContent().finish())
 }

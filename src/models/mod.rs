@@ -112,6 +112,23 @@ pub struct ProductResponse {
     pub name: String,
 }
 
+/// A plan row as returned by admin endpoints.
+#[derive(Debug, Serialize)]
+pub struct PlanResponse {
+    pub id: Uuid,
+    pub product_slug: String,
+    pub slug: String,
+    pub name: String,
+}
+
+/// Request body for creating a new plan.
+#[derive(Debug, Deserialize)]
+pub struct CreatePlanRequest {
+    pub product_slug: String,
+    pub slug: String,
+    pub name: String,
+}
+
 /// A user account stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {

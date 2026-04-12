@@ -354,7 +354,11 @@ async fn main() -> std::io::Result<()> {
                             .service(handlers::admin::update_subscription)
                             .service(handlers::admin::delete_subscription)
                             // Products
-                            .service(handlers::admin::list_products),
+                            .service(handlers::admin::list_products)
+                            // Plans
+                            .service(handlers::admin::list_plans)
+                            .service(handlers::admin::create_plan)
+                            .service(handlers::admin::delete_plan),
                     ),
             )
             // Webhook endpoints — no auth, provider-signed payloads

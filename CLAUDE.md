@@ -79,6 +79,7 @@ psql "$DATABASE_URL" -f migrations/006_subscriptions.sql
 psql "$DATABASE_URL" -f migrations/007_grandfather_subscriptions.sql
 psql "$DATABASE_URL" -f migrations/008_admin_user_permissions.sql
 psql "$DATABASE_URL" -f migrations/009_comad_product.sql
+psql "$DATABASE_URL" -f migrations/010_plans.sql
 cargo run
 ```
 
@@ -104,6 +105,7 @@ This is a single-binary Actix-web microservice. `src/main.rs` wires together the
   - `POST /admin/roles/{name}/permissions/{perm}`, `DELETE /admin/roles/{name}/permissions/{perm}`
   - `GET /admin/subscriptions`, `PATCH /admin/subscriptions/{id}`, `DELETE /admin/subscriptions/{id}`
   - `GET /admin/products`
+  - `GET /admin/plans?product=<slug>`, `POST /admin/plans`, `DELETE /admin/plans/{id}`
 - `src/handlers/subscriptions.rs` — `GET /subscriptions/current?product=<slug>` (JWT-protected; returns Individual free tier when no row exists), `POST /subscriptions/checkout` (JWT-protected; initiates Stripe or PayPal checkout), `POST /subscriptions/portal` (JWT-protected; Stripe Customer Portal), `POST /webhooks/stripe`, `POST /webhooks/paypal` (signature-verified webhook receivers)
 - `src/handlers/docs.rs` — `GET /openapi.yaml`, `GET /openapi.json` (YAML spec embedded via `include_str!`, converted to JSON with `serde_yaml`), `GET /docs` (Swagger UI via CDN); all three disabled when `ENABLE_DOCS=false`
 - `src/middleware/auth.rs` — `AuthMiddleware`: validates Bearer JWT, optionally checks a permission claim, injects `Claims` into request extensions
@@ -122,7 +124,7 @@ Middleware is registered in this order (innermost → outermost, i.e. outermost 
 
 **Data flow:** handlers call `db::*` functions directly (no service layer). All DB functions take `&Pool` and return `Result<T, AppError>`. The `AppError` enum converts into JSON `{ "error": "..." }` responses automatically.
 
-**Database:** PostgreSQL only, native SQL via `tokio-postgres`. Schema is in `migrations/001_initial.sql`; email-confirmation columns are added by `migrations/002_email_confirmation.sql`; RBAC tables (`roles`, `permissions`, `role_permissions`, `user_roles`) and seed data are in `migrations/003_rbac.sql`; collection-server roles/permissions (`collection_admin`, `curator`, `registrar`) are in `migrations/004_collection_permissions.sql`; subscription tables (`products`, `subscriptions`, `subscription_seats`) are in `migrations/005_products.sql` and `migrations/006_subscriptions.sql`; existing users are grandfathered into the Individual (free) plan by `migrations/007_grandfather_subscriptions.sql`. In production, all migrations are applied automatically by the `migrate` service. In dev Docker Compose, `001_initial.sql` runs automatically; the rest must be applied manually.
+**Database:** PostgreSQL only, native SQL via `tokio-postgres`. Schema is in `migrations/001_initial.sql`; email-confirmation columns are added by `migrations/002_email_confirmation.sql`; RBAC tables (`roles`, `permissions`, `role_permissions`, `user_roles`) and seed data are in `migrations/003_rbac.sql`; collection-server roles/permissions (`collection_admin`, `curator`, `registrar`) are in `migrations/004_collection_permissions.sql`; subscription tables (`products`, `subscriptions`, `subscription_seats`) are in `migrations/005_products.sql` and `migrations/006_subscriptions.sql`; existing users are grandfathered into the Individual (free) plan by `migrations/007_grandfather_subscriptions.sql`; `010_plans.sql` adds the `plans` table and seeds default plans for `clann` and `comad`. In production, all migrations are applied automatically by the `migrate` service. In dev Docker Compose, `001_initial.sql` runs automatically; the rest must be applied manually.
 
 **JWT:** Tokens carry `{ sub, iat, exp, roles, permissions }` claims where `sub` is the user UUID as a string. `AuthMiddleware` validates Bearer tokens and injects `Claims` into request extensions. `PUT /users/{id}/password` requires a valid JWT (ownership or `users:change_any_password` permission). `GET /health` requires the `health:read` permission (admin only).
 

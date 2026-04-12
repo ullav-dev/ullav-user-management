@@ -1,7 +1,7 @@
 use crate::errors::AppError;
 use crate::models::{
-    AdminSubscription, PasswordResetToken, ProductResponse, RoleWithPermissions, Subscription,
-    SubscriptionsPage, User, UserWithRoles, UsersPage,
+    AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
+    Subscription, SubscriptionsPage, User, UserWithRoles, UsersPage,
 };
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
@@ -529,7 +529,7 @@ fn row_to_user_with_roles(row: &tokio_postgres::Row) -> UserWithRoles {
 
 // ── Admin functions ───────────────────────────────────────────────────────────
 
-/// List users with optional search, ordered by created_at DESC.
+/// List users with optional search and sort, ordered by `sort_by` column.
 ///
 /// Returns `(users, total_count)`.
 pub async fn list_users_paginated(
@@ -537,9 +537,20 @@ pub async fn list_users_paginated(
     page: i64,
     page_size: i64,
     search: &str,
+    sort_by: &str,
+    sort_dir: &str,
 ) -> Result<UsersPage, AppError> {
     let client = pool.get().await?;
     let offset = (page - 1) * page_size;
+
+    // Whitelist sort column and direction to prevent SQL injection
+    let order_col = match sort_by {
+        "username" => "u.username",
+        "email" => "u.email",
+        _ => "u.created_at",
+    };
+    let order_dir = if sort_dir.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" };
+    let order_clause = format!("ORDER BY {} {}", order_col, order_dir);
 
     let (total_row, rows) = if search.is_empty() {
         let total = client
@@ -547,14 +558,17 @@ pub async fn list_users_paginated(
             .await?;
         let rows = client
             .query(
-                "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
-                        COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
-                 FROM users u
-                 LEFT JOIN user_roles ur ON ur.user_id = u.id
-                 LEFT JOIN roles r ON r.id = ur.role_id
-                 GROUP BY u.id
-                 ORDER BY u.created_at DESC
-                 LIMIT $1 OFFSET $2",
+                &format!(
+                    "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+                            COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
+                     FROM users u
+                     LEFT JOIN user_roles ur ON ur.user_id = u.id
+                     LEFT JOIN roles r ON r.id = ur.role_id
+                     GROUP BY u.id
+                     {}
+                     LIMIT $1 OFFSET $2",
+                    order_clause
+                ),
                 &[&page_size, &offset],
             )
             .await?;
@@ -569,15 +583,18 @@ pub async fn list_users_paginated(
             .await?;
         let rows = client
             .query(
-                "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
-                        COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
-                 FROM users u
-                 LEFT JOIN user_roles ur ON ur.user_id = u.id
-                 LEFT JOIN roles r ON r.id = ur.role_id
-                 WHERE LOWER(u.username) LIKE $1 OR LOWER(u.email) LIKE $1
-                 GROUP BY u.id
-                 ORDER BY u.created_at DESC
-                 LIMIT $2 OFFSET $3",
+                &format!(
+                    "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+                            COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
+                     FROM users u
+                     LEFT JOIN user_roles ur ON ur.user_id = u.id
+                     LEFT JOIN roles r ON r.id = ur.role_id
+                     WHERE LOWER(u.username) LIKE $1 OR LOWER(u.email) LIKE $1
+                     GROUP BY u.id
+                     {}
+                     LIMIT $2 OFFSET $3",
+                    order_clause
+                ),
                 &[&pattern, &page_size, &offset],
             )
             .await?;
@@ -934,6 +951,92 @@ pub async fn list_products(pool: &Pool) -> Result<Vec<ProductResponse>, AppError
         .iter()
         .map(|r| ProductResponse { slug: r.get("slug"), name: r.get("name") })
         .collect())
+}
+
+// ── Plan management ───────────────────────────────────────────────────────────
+
+/// List plans, optionally filtered to a single product by slug.
+pub async fn list_plans(pool: &Pool, product_slug: &str) -> Result<Vec<PlanResponse>, AppError> {
+    let client = pool.get().await?;
+    let rows = if product_slug.is_empty() {
+        client
+            .query(
+                "SELECT pl.id, pr.slug AS product_slug, pl.slug, pl.name
+                 FROM plans pl
+                 JOIN products pr ON pr.id = pl.product_id
+                 ORDER BY pr.name, pl.name",
+                &[],
+            )
+            .await?
+    } else {
+        client
+            .query(
+                "SELECT pl.id, pr.slug AS product_slug, pl.slug, pl.name
+                 FROM plans pl
+                 JOIN products pr ON pr.id = pl.product_id
+                 WHERE pr.slug = $1
+                 ORDER BY pl.name",
+                &[&product_slug],
+            )
+            .await?
+    };
+    Ok(rows
+        .iter()
+        .map(|r| PlanResponse {
+            id: r.get("id"),
+            product_slug: r.get("product_slug"),
+            slug: r.get("slug"),
+            name: r.get("name"),
+        })
+        .collect())
+}
+
+/// Create a new plan for a product (identified by slug).
+pub async fn create_plan(pool: &Pool, product_slug: &str, slug: &str, name: &str) -> Result<PlanResponse, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "INSERT INTO plans (product_id, slug, name)
+             SELECT p.id, $2, $3 FROM products p WHERE p.slug = $1
+             RETURNING id",
+            &[&product_slug, &slug, &name],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db) = e.as_db_error() {
+                if db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+    let id: Uuid = row.get("id");
+    let fetched = client
+        .query_one(
+            "SELECT pl.id, pr.slug AS product_slug, pl.slug, pl.name
+             FROM plans pl JOIN products pr ON pr.id = pl.product_id
+             WHERE pl.id = $1",
+            &[&id],
+        )
+        .await?;
+    Ok(PlanResponse {
+        id: fetched.get("id"),
+        product_slug: fetched.get("product_slug"),
+        slug: fetched.get("slug"),
+        name: fetched.get("name"),
+    })
+}
+
+/// Delete a plan by ID.
+pub async fn delete_plan(pool: &Pool, id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute("DELETE FROM plans WHERE id = $1", &[&id])
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
 }
 
 fn row_to_admin_subscription(row: &tokio_postgres::Row) -> AdminSubscription {

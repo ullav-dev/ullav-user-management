@@ -54,6 +54,27 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 | `POST` | `/subscriptions/portal` | Bearer JWT | Create Stripe Customer Portal session |
 | `POST` | `/webhooks/stripe` | — (signature verified) | Stripe lifecycle event receiver |
 | `POST` | `/webhooks/paypal` | — (signature verified) | PayPal lifecycle event receiver |
+| `GET`  | `/admin/users` | Bearer JWT (`users:read`) | List users (paginated, searchable; `sort_by=username\|email\|created_at`, `sort_dir=asc\|desc`) |
+| `GET`  | `/admin/users/{id}` | Bearer JWT (`users:read`) | Get single user with roles |
+| `PATCH` | `/admin/users/{id}` | Bearer JWT (`users:read`) | Update user profile |
+| `DELETE` | `/admin/users/{id}` | Bearer JWT (`users:read`) | Delete user |
+| `POST` | `/admin/users/{id}/roles/{role}` | Bearer JWT (`users:read`) | Assign role to user |
+| `DELETE` | `/admin/users/{id}/roles/{role}` | Bearer JWT (`users:read`) | Remove role from user |
+| `POST` | `/admin/users/{id}/subscriptions` | Bearer JWT (`users:read`) | Create subscription for user |
+| `GET`  | `/admin/roles` | Bearer JWT (`users:read`) | List roles with permissions |
+| `POST` | `/admin/roles` | Bearer JWT (`users:read`) | Create role |
+| `DELETE` | `/admin/roles/{name}` | Bearer JWT (`users:read`) | Delete role |
+| `GET`  | `/admin/permissions` | Bearer JWT (`users:read`) | List all permissions |
+| `POST` | `/admin/permissions` | Bearer JWT (`users:read`) | Create permission |
+| `POST` | `/admin/roles/{name}/permissions/{perm}` | Bearer JWT (`users:read`) | Assign permission to role |
+| `DELETE` | `/admin/roles/{name}/permissions/{perm}` | Bearer JWT (`users:read`) | Remove permission from role |
+| `GET`  | `/admin/subscriptions` | Bearer JWT (`users:read`) | List subscriptions (paginated, filterable by product) |
+| `PATCH` | `/admin/subscriptions/{id}` | Bearer JWT (`users:read`) | Update plan / status / seat count |
+| `DELETE` | `/admin/subscriptions/{id}` | Bearer JWT (`users:read`) | Delete subscription |
+| `GET`  | `/admin/products` | Bearer JWT (`users:read`) | List products |
+| `GET`  | `/admin/plans` | Bearer JWT (`users:read`) | List plans (optionally filtered by `?product=<slug>`) |
+| `POST` | `/admin/plans` | Bearer JWT (`users:read`) | Create plan |
+| `DELETE` | `/admin/plans/{id}` | Bearer JWT (`users:read`) | Delete plan |
 | `GET`  | `/openapi.yaml` | — | OpenAPI spec (YAML) |
 | `GET`  | `/openapi.json` | — | OpenAPI spec (JSON) |
 | `GET`  | `/docs` | — | Swagger UI |
@@ -295,7 +316,8 @@ The API will be available at `http://localhost:8081`.
 >   -f migrations/006_subscriptions.sql \
 >   -f migrations/007_grandfather_subscriptions.sql \
 >   -f migrations/008_admin_user_permissions.sql \
->   -f migrations/009_comad_product.sql
+>   -f migrations/009_comad_product.sql \
+>   -f migrations/010_plans.sql
 > ```
 
 ### Production deployment
@@ -355,6 +377,7 @@ psql "$DATABASE_URL" -f migrations/006_subscriptions.sql
 psql "$DATABASE_URL" -f migrations/007_grandfather_subscriptions.sql
 psql "$DATABASE_URL" -f migrations/008_admin_user_permissions.sql
 psql "$DATABASE_URL" -f migrations/009_comad_product.sql
+psql "$DATABASE_URL" -f migrations/010_plans.sql
 
 # 3. Run
 cargo run
@@ -536,5 +559,8 @@ Migrations are applied in order:
 | `005_products.sql` | `products` table; seeds the `clann` product |
 | `006_subscriptions.sql` | `subscriptions`, `subscription_seats` tables with indexes |
 | `007_grandfather_subscriptions.sql` | Seeds all existing users with an Individual (free) Clann subscription |
+| `008_admin_user_permissions.sql` | Adds `users:read` and `users:write` permissions; grants them to `admin` role |
+| `009_comad_product.sql` | Seeds the `comad` product |
+| `010_plans.sql` | Adds `plans` table; seeds default plans for `clann` and `comad` |
 
 In production, migrations are applied automatically by the `migrate` service on each deploy (idempotent — already-applied files are skipped). For local development without Docker, apply them manually with `psql` as shown above.

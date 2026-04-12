@@ -9,7 +9,8 @@ A user management microservice built in Rust that provides:
 - **Password management** — users change their own password; admins can change any user's password.
 - **Password reset** — request and confirm a secure password-reset token; a reset link is emailed automatically when SMTP is configured.
 - **Multi-tenant email links** — `POST /users` and `POST /auth/password-reset/request` accept an optional `app_url` field; the service validates it against an allowlist (`ALLOWED_APP_URLS`) and uses it as the base for confirmation and reset links, enabling one auth service to serve multiple front-end applications.
-- **Docker secrets** — `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a `_FILE` variant (e.g. `JWT_SECRET_FILE=/run/secrets/jwt_secret`) for use with Docker / Compose secrets.
+- **Admin API** — JWT-protected (`users:read`) endpoints for managing users, roles, permissions, subscriptions, products, and plans; user list supports pagination, search, and sorting.
+- **Docker secrets** — `DATABASE_URL`, `JWT_SECRET`, `SMTP_PASSWORD`, `ADMIN_PASSWORD`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `PAYPAL_CLIENT_ID`, and `PAYPAL_CLIENT_SECRET` each support a `_FILE` variant for use with Docker / Compose secrets.
 - **HTTPS enforcement** — non-HTTPS requests are rejected with `403` unless the client IP is localhost or listed in `WHITELIST`; proxy-terminated TLS is detected via `X-Forwarded-Proto`.
 - **Geo-blocking** — requests from IPs in blocked countries are denied with `403`; configured via `GEOBLOCK` (ISO country codes) and `GEOIP_DB` (MaxMind `.mmdb` file).
 - **CORS** — cross-origin resource sharing headers; configured via `CORS_ORIGINS` (`*` for any origin, or a comma-separated list of allowed origins).

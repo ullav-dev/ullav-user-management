@@ -25,11 +25,13 @@ fn resolve_secret(name: &str) -> Option<String> {
     env::var(name).ok()
 }
 
+mod config;
 mod db;
 mod errors;
 mod handlers;
 mod middleware;
 mod models;
+mod payments;
 mod seed;
 mod utils;
 #[cfg(test)]
@@ -53,6 +55,14 @@ pub struct AppState {
     /// Allowlist of caller-supplied `app_url` values accepted in request bodies.
     /// Empty when `ALLOWED_APP_URLS` is not configured (single-tenant mode).
     pub allowed_app_urls: Vec<String>,
+    /// Shared HTTP client for payment provider API calls.
+    pub http_client: reqwest::Client,
+    /// Stripe configuration — `None` when Stripe env vars are not set.
+    pub stripe: Option<config::StripeConfig>,
+    /// PayPal configuration — `None` when PayPal env vars are not set.
+    pub paypal: Option<config::PayPalConfig>,
+    /// Base URL of the Clann app — used to build checkout return/cancel URLs.
+    pub clann_app_url: String,
 }
 
 #[actix_web::main]
@@ -213,6 +223,25 @@ async fn main() -> std::io::Result<()> {
         log::error!("Failed to seed admin user: {}", e);
     }
 
+    // Payment configuration — optional; endpoints return 501 when not set.
+    let stripe_config = build_stripe_config();
+    let paypal_config = build_paypal_config();
+    if stripe_config.is_some() {
+        log::info!("Stripe payment integration enabled");
+    } else {
+        log::info!("STRIPE_SECRET_KEY not set — Stripe disabled");
+    }
+    if paypal_config.is_some() {
+        log::info!("PayPal payment integration enabled");
+    } else {
+        log::info!("PAYPAL_CLIENT_ID not set — PayPal disabled");
+    }
+
+    let clann_app_url = env::var("CLANN_APP_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".into());
+
+    let http_client = reqwest::Client::new();
+
     let state = web::Data::new(AppState {
         pool,
         jwt_secret: jwt_secret.clone(),
@@ -223,6 +252,10 @@ async fn main() -> std::io::Result<()> {
         smtp_from,
         app_base_url,
         allowed_app_urls,
+        http_client,
+        stripe: stripe_config,
+        paypal: paypal_config,
+        clann_app_url,
     });
 
     log::info!("Starting server on {}:{}", host, port);
@@ -274,23 +307,107 @@ async fn main() -> std::io::Result<()> {
         }
 
         app
-            // JWT required — ownership/permission checked in handler
+            // JWT required — all protected routes in one scope to avoid prefix-matching conflicts.
+            // Per-route permission enforcement is handled by nested scopes with path prefixes.
             .service(
                 web::scope("")
                     .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone()))
-                    .service(handlers::auth::change_password),
+                    // Any authenticated user
+                    .service(handlers::auth::change_password)
+                    .service(handlers::subscriptions::get_current_subscription)
+                    .service(handlers::subscriptions::create_checkout_session)
+                    .service(handlers::subscriptions::create_portal_session)
+                    // Health — requires `health:read`; use /health prefix to isolate
+                    .service(
+                        web::scope("/health")
+                            .wrap(middleware::auth::AuthMiddleware::require(
+                                jwt_secret.clone(),
+                                "health:read",
+                            ))
+                            .service(handlers::health::health_scoped),
+                    )
+                    // Admin user/role/subscription management — requires `users:read`
+                    .service(
+                        web::scope("/admin")
+                            .wrap(middleware::auth::AuthMiddleware::require(
+                                jwt_secret.clone(),
+                                "users:read",
+                            ))
+                            // Users
+                            .service(handlers::admin::list_users)
+                            .service(handlers::admin::get_user)
+                            .service(handlers::admin::update_user)
+                            .service(handlers::admin::delete_user)
+                            .service(handlers::admin::add_user_role)
+                            .service(handlers::admin::remove_user_role)
+                            .service(handlers::admin::create_user_subscription)
+                            // Roles & permissions
+                            .service(handlers::admin::list_roles)
+                            .service(handlers::admin::create_role)
+                            .service(handlers::admin::delete_role)
+                            .service(handlers::admin::list_permissions)
+                            .service(handlers::admin::create_permission)
+                            .service(handlers::admin::add_role_permission)
+                            .service(handlers::admin::remove_role_permission)
+                            // Subscriptions
+                            .service(handlers::admin::list_subscriptions)
+                            .service(handlers::admin::update_subscription)
+                            .service(handlers::admin::delete_subscription)
+                            // Products
+                            .service(handlers::admin::list_products)
+                            // Plans
+                            .service(handlers::admin::list_plans)
+                            .service(handlers::admin::create_plan)
+                            .service(handlers::admin::delete_plan),
+                    ),
             )
-            // Admin only — requires `health:read` permission
-            .service(
-                web::scope("")
-                    .wrap(middleware::auth::AuthMiddleware::require(
-                        jwt_secret.clone(),
-                        "health:read",
-                    ))
-                    .service(handlers::health::health),
-            )
+            // Webhook endpoints — no auth, provider-signed payloads
+            .service(handlers::subscriptions::stripe_webhook)
+            .service(handlers::subscriptions::paypal_webhook)
     })
     .bind((host.as_str(), port))?
     .run()
     .await
+}
+
+// ── Payment config helpers ────────────────────────────────────────────────────
+
+fn build_stripe_config() -> Option<config::StripeConfig> {
+    let secret_key = resolve_secret("STRIPE_SECRET_KEY")?;
+    let webhook_secret = resolve_secret("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+    let price_id_clann_family_base = env::var("STRIPE_PRICE_CLANN_FAMILY_BASE").ok()?;
+    let price_id_clann_family_seat = env::var("STRIPE_PRICE_CLANN_FAMILY_SEAT").ok()?;
+    let price_id_clann_professional = env::var("STRIPE_PRICE_CLANN_PROFESSIONAL").ok()?;
+    Some(config::StripeConfig {
+        secret_key,
+        webhook_secret,
+        price_id_clann_family_base,
+        price_id_clann_family_seat,
+        price_id_clann_professional,
+    })
+}
+
+fn build_paypal_config() -> Option<config::PayPalConfig> {
+    let client_id = resolve_secret("PAYPAL_CLIENT_ID")?;
+    let client_secret = resolve_secret("PAYPAL_CLIENT_SECRET")?;
+    let plan_id_clann_family = env::var("PAYPAL_PLAN_CLANN_FAMILY").ok()?;
+    let plan_id_clann_professional = env::var("PAYPAL_PLAN_CLANN_PROFESSIONAL").ok()?;
+    let webhook_id = env::var("PAYPAL_WEBHOOK_ID").unwrap_or_default();
+    let sandbox: bool = env::var("PAYPAL_SANDBOX")
+        .unwrap_or_else(|_| "true".into())
+        .parse()
+        .unwrap_or(true);
+    let api_base = if sandbox {
+        "https://api-m.sandbox.paypal.com".into()
+    } else {
+        "https://api-m.paypal.com".into()
+    };
+    Some(config::PayPalConfig {
+        client_id,
+        client_secret,
+        plan_id_clann_family,
+        plan_id_clann_professional,
+        webhook_id,
+        api_base,
+    })
 }

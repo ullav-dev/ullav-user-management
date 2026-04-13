@@ -156,14 +156,16 @@ mod password_tests {
 
 #[cfg(test)]
 mod jwt_tests {
-    use crate::utils::jwt::{create_jwt, decode_jwt};
+    use crate::utils::jwt::{create_jwt, decode_jwt, SubscriptionClaim};
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     #[test]
     fn test_create_and_decode_jwt() {
         let id = Uuid::new_v4();
         let secret = "test_secret_key_12345";
-        let token = create_jwt(id, secret, 1, vec![], vec![]).expect("create_jwt should succeed");
+        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new())
+            .expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
         assert_eq!(claims.sub, id.to_string());
     }
@@ -171,9 +173,87 @@ mod jwt_tests {
     #[test]
     fn test_jwt_wrong_secret_fails() {
         let id = Uuid::new_v4();
-        let token = create_jwt(id, "secret_a", 1, vec![], vec![]).expect("create_jwt should succeed");
+        let token = create_jwt(id, "secret_a", 1, vec![], vec![], HashMap::new())
+            .expect("create_jwt should succeed");
         let result = decode_jwt(&token, "secret_b");
         assert!(result.is_err(), "decoding with wrong secret should fail");
+    }
+
+    #[test]
+    fn test_jwt_subscription_claims_round_trip() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let mut subs = HashMap::new();
+        subs.insert(
+            "clann".into(),
+            SubscriptionClaim {
+                tier: "family".into(),
+                status: "active".into(),
+                seat_count: Some(5),
+            },
+        );
+        let token = create_jwt(id, secret, 1, vec![], vec![], subs)
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+
+        let clann = claims.subscriptions.get("clann").expect("clann claim must be present");
+        assert_eq!(clann.tier, "family");
+        assert_eq!(clann.status, "active");
+        assert_eq!(clann.seat_count, Some(5));
+    }
+
+    #[test]
+    fn test_jwt_no_subscriptions_returns_empty_map() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new())
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+        assert!(claims.subscriptions.is_empty(), "subscriptions map must be empty");
+    }
+
+    #[test]
+    fn test_jwt_individual_subscription_no_seat_count() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let mut subs = HashMap::new();
+        subs.insert(
+            "clann".into(),
+            SubscriptionClaim {
+                tier: "individual".into(),
+                status: "active".into(),
+                seat_count: None,
+            },
+        );
+        let token = create_jwt(id, secret, 1, vec![], vec![], subs)
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+
+        let clann = claims.subscriptions.get("clann").expect("clann claim must be present");
+        assert_eq!(clann.tier, "individual");
+        assert!(clann.seat_count.is_none(), "individual plan must have no seat_count");
+    }
+
+    #[test]
+    fn test_jwt_multiple_product_subscriptions() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let mut subs = HashMap::new();
+        subs.insert(
+            "clann".into(),
+            SubscriptionClaim { tier: "family".into(), status: "active".into(), seat_count: Some(3) },
+        );
+        subs.insert(
+            "dam".into(),
+            SubscriptionClaim { tier: "professional".into(), status: "trialing".into(), seat_count: None },
+        );
+        let token = create_jwt(id, secret, 1, vec![], vec![], subs)
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+
+        assert_eq!(claims.subscriptions.len(), 2);
+        assert_eq!(claims.subscriptions["clann"].tier, "family");
+        assert_eq!(claims.subscriptions["dam"].status, "trialing");
     }
 }
 
@@ -206,6 +286,10 @@ mod handler_tests {
             smtp_from: String::new(),
             app_base_url: String::new(),
             allowed_app_urls: vec![],
+            http_client: reqwest::Client::new(),
+            stripe: None,
+            paypal: None,
+            clann_app_url: String::new(),
         })
     }
 
@@ -274,6 +358,10 @@ mod health_tests {
             smtp_from: String::new(),
             app_base_url: String::new(),
             allowed_app_urls: vec![],
+            http_client: reqwest::Client::new(),
+            stripe: None,
+            paypal: None,
+            clann_app_url: String::new(),
         })
     }
 
@@ -354,6 +442,10 @@ mod app_url_handler_tests {
             smtp_from: String::new(),
             app_base_url: "https://default.example.com".into(),
             allowed_app_urls,
+            http_client: reqwest::Client::new(),
+            stripe: None,
+            paypal: None,
+            clann_app_url: String::new(),
         })
     }
 
@@ -517,5 +609,121 @@ mod app_url_handler_tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 200);
+    }
+}
+
+/// Unit tests for the `SubscriptionClaim` struct and `SubscriptionResponse` conversion.
+#[cfg(test)]
+mod subscription_tests {
+    use crate::models::{Subscription, SubscriptionResponse};
+    use crate::utils::jwt::SubscriptionClaim;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn make_subscription(plan: &str, status: &str, seat_count: i16) -> Subscription {
+        Subscription {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            product_id: Uuid::new_v4(),
+            product_slug: "clann".into(),
+            plan: plan.into(),
+            status: status.into(),
+            payment_provider: Some("stripe".into()),
+            provider_subscription_id: Some("sub_test".into()),
+            provider_customer_id: Some("cus_test".into()),
+            seat_count,
+            trial_end: None,
+            current_period_start: None,
+            current_period_end: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// `SubscriptionResponse::from` must copy all public fields correctly.
+    #[test]
+    fn test_subscription_response_from_subscription() {
+        let sub = make_subscription("family", "active", 5);
+        let sub_id = sub.id;
+        let resp = SubscriptionResponse::from(sub);
+
+        assert_eq!(resp.id, sub_id);
+        assert_eq!(resp.product, "clann");
+        assert_eq!(resp.plan, "family");
+        assert_eq!(resp.status, "active");
+        assert_eq!(resp.seat_count, 5);
+        assert!(resp.trial_end.is_none());
+        assert!(resp.current_period_start.is_none());
+        assert!(resp.current_period_end.is_none());
+    }
+
+    /// `SubscriptionResponse::from` must preserve optional period dates when present.
+    #[test]
+    fn test_subscription_response_period_dates_preserved() {
+        let now = Utc::now();
+        let mut sub = make_subscription("individual", "active", 1);
+        sub.current_period_start = Some(now);
+        sub.current_period_end = Some(now);
+        let resp = SubscriptionResponse::from(sub);
+
+        assert!(resp.current_period_start.is_some());
+        assert!(resp.current_period_end.is_some());
+    }
+
+    /// A `SubscriptionClaim` with `seat_count = 1` must map to `None` per login handler logic.
+    #[test]
+    fn test_subscription_claim_seat_count_omitted_for_single_seat() {
+        // The login handler sets seat_count to None when seat_count <= 1.
+        let sub = make_subscription("individual", "active", 1);
+        let seat_count = if sub.seat_count > 1 { Some(sub.seat_count) } else { None };
+        let claim = SubscriptionClaim {
+            tier: sub.plan.clone(),
+            status: sub.status.clone(),
+            seat_count,
+        };
+        assert!(claim.seat_count.is_none(), "seat_count must be None for individual plan");
+    }
+
+    /// A multi-seat subscription must carry seat_count in the claim.
+    #[test]
+    fn test_subscription_claim_seat_count_present_for_multi_seat() {
+        let sub = make_subscription("family", "active", 6);
+        let seat_count = if sub.seat_count > 1 { Some(sub.seat_count) } else { None };
+        let claim = SubscriptionClaim {
+            tier: sub.plan.clone(),
+            status: sub.status.clone(),
+            seat_count,
+        };
+        assert_eq!(claim.seat_count, Some(6));
+    }
+
+    /// `SubscriptionClaim` fields must survive JSON serialisation and deserialisation.
+    #[test]
+    fn test_subscription_claim_serde_round_trip() {
+        let claim = SubscriptionClaim {
+            tier: "professional".into(),
+            status: "trialing".into(),
+            seat_count: None,
+        };
+        let json = serde_json::to_string(&claim).expect("serialisation must succeed");
+        let back: SubscriptionClaim = serde_json::from_str(&json).expect("deserialisation must succeed");
+        assert_eq!(back.tier, "professional");
+        assert_eq!(back.status, "trialing");
+        assert!(back.seat_count.is_none());
+        // seat_count must be omitted from JSON when None (skip_serializing_if).
+        assert!(!json.contains("seat_count"), "seat_count must be absent from JSON when None");
+    }
+
+    /// seat_count must appear in JSON when present.
+    #[test]
+    fn test_subscription_claim_serde_seat_count_included_when_some() {
+        let claim = SubscriptionClaim {
+            tier: "family".into(),
+            status: "active".into(),
+            seat_count: Some(4),
+        };
+        let json = serde_json::to_string(&claim).expect("serialisation must succeed");
+        assert!(json.contains("seat_count"), "seat_count must appear in JSON when Some");
+        assert!(json.contains('4'));
     }
 }

@@ -2,7 +2,23 @@ use crate::errors::AppError;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
+
+/// Per-product subscription data embedded in the JWT.
+///
+/// Keyed by product slug (e.g. `"clann"`) in the `subscriptions` claim map.
+/// Downstream services read this to enforce plan limits without a DB call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionClaim {
+    /// Plan name: "individual", "family", "professional", "enterprise".
+    pub tier: String,
+    /// Subscription status: "active", "trialing", "past_due", "cancelled".
+    pub status: String,
+    /// Number of seats — present for multi-seat plans (Family/Team).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_count: Option<i16>,
+}
 
 /// JWT claims embedded in the token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +33,10 @@ pub struct Claims {
     pub roles: Vec<String>,
     /// Permissions granted to the user (union of all role permissions).
     pub permissions: Vec<String>,
+    /// Active subscriptions keyed by product slug.
+    /// Defaults to an empty map so tokens issued before Phase 4 still decode.
+    #[serde(default)]
+    pub subscriptions: HashMap<String, SubscriptionClaim>,
 }
 
 /// Create a signed JWT for the given user id.
@@ -26,6 +46,7 @@ pub fn create_jwt(
     ttl_hours: i64,
     roles: Vec<String>,
     permissions: Vec<String>,
+    subscriptions: HashMap<String, SubscriptionClaim>,
 ) -> Result<String, AppError> {
     let now = Utc::now();
     let claims = Claims {
@@ -34,6 +55,7 @@ pub fn create_jwt(
         exp: (now + Duration::hours(ttl_hours)).timestamp(),
         roles,
         permissions,
+        subscriptions,
     };
 
     encode(

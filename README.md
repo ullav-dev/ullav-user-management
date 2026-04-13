@@ -9,10 +9,13 @@ A user management microservice built in Rust that provides:
 - **Password management** — users change their own password; admins can change any user's password.
 - **Password reset** — request and confirm a secure password-reset token; a reset link is emailed automatically when SMTP is configured.
 - **Multi-tenant email links** — `POST /users` and `POST /auth/password-reset/request` accept an optional `app_url` field; the service validates it against an allowlist (`ALLOWED_APP_URLS`) and uses it as the base for confirmation and reset links, enabling one auth service to serve multiple front-end applications.
-- **Docker secrets** — `JWT_SECRET`, `SMTP_PASSWORD`, and `ADMIN_PASSWORD` each support a `_FILE` variant (e.g. `JWT_SECRET_FILE=/run/secrets/jwt_secret`) for use with Docker / Compose secrets.
+- **Admin API** — JWT-protected (`users:read`) endpoints for managing users, roles, permissions, subscriptions, products, and plans; user list supports pagination, search, and sorting.
+- **Docker secrets** — `DATABASE_URL`, `JWT_SECRET`, `SMTP_PASSWORD`, `ADMIN_PASSWORD`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `PAYPAL_CLIENT_ID`, and `PAYPAL_CLIENT_SECRET` each support a `_FILE` variant for use with Docker / Compose secrets.
 - **HTTPS enforcement** — non-HTTPS requests are rejected with `403` unless the client IP is localhost or listed in `WHITELIST`; proxy-terminated TLS is detected via `X-Forwarded-Proto`.
 - **Geo-blocking** — requests from IPs in blocked countries are denied with `403`; configured via `GEOBLOCK` (ISO country codes) and `GEOIP_DB` (MaxMind `.mmdb` file).
 - **CORS** — cross-origin resource sharing headers; configured via `CORS_ORIGINS` (`*` for any origin, or a comma-separated list of allowed origins).
+- **Subscriptions** — per-product subscription management (Individual free, Family, Professional plans). Stripe and PayPal checkout, Stripe Customer Portal, and webhook receivers for lifecycle events. Subscription state (plan, status, seat count) is embedded in the JWT at login under the `subscriptions` claim.
+- **Grandfather free plan** — all users who existed before the subscription system was introduced are automatically seeded with an Individual (free) subscription for Clann.
 
 Data is persisted in **PostgreSQL** using native SQL (no ORM).
 
@@ -47,6 +50,32 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 | `POST` | `/auth/password-reset/confirm` | — | Complete a password reset |
 | `PUT`  | `/users/{id}/password` | Bearer JWT | Change a user's password |
 | `GET`  | `/health` | Bearer JWT (`health:read`) | Service and database health check |
+| `GET`  | `/subscriptions/current?product=<slug>` | Bearer JWT | Active subscription for a product (returns Individual free if none) |
+| `POST` | `/subscriptions/checkout` | Bearer JWT | Initiate Stripe or PayPal checkout session |
+| `POST` | `/subscriptions/portal` | Bearer JWT | Create Stripe Customer Portal session |
+| `POST` | `/webhooks/stripe` | — (signature verified) | Stripe lifecycle event receiver |
+| `POST` | `/webhooks/paypal` | — (signature verified) | PayPal lifecycle event receiver |
+| `GET`  | `/admin/users` | Bearer JWT (`users:read`) | List users (paginated, searchable; `sort_by=username\|email\|created_at`, `sort_dir=asc\|desc`) |
+| `GET`  | `/admin/users/{id}` | Bearer JWT (`users:read`) | Get single user with roles |
+| `PATCH` | `/admin/users/{id}` | Bearer JWT (`users:read`) | Update user profile |
+| `DELETE` | `/admin/users/{id}` | Bearer JWT (`users:read`) | Delete user |
+| `POST` | `/admin/users/{id}/roles/{role}` | Bearer JWT (`users:read`) | Assign role to user |
+| `DELETE` | `/admin/users/{id}/roles/{role}` | Bearer JWT (`users:read`) | Remove role from user |
+| `POST` | `/admin/users/{id}/subscriptions` | Bearer JWT (`users:read`) | Create subscription for user |
+| `GET`  | `/admin/roles` | Bearer JWT (`users:read`) | List roles with permissions |
+| `POST` | `/admin/roles` | Bearer JWT (`users:read`) | Create role |
+| `DELETE` | `/admin/roles/{name}` | Bearer JWT (`users:read`) | Delete role |
+| `GET`  | `/admin/permissions` | Bearer JWT (`users:read`) | List all permissions |
+| `POST` | `/admin/permissions` | Bearer JWT (`users:read`) | Create permission |
+| `POST` | `/admin/roles/{name}/permissions/{perm}` | Bearer JWT (`users:read`) | Assign permission to role |
+| `DELETE` | `/admin/roles/{name}/permissions/{perm}` | Bearer JWT (`users:read`) | Remove permission from role |
+| `GET`  | `/admin/subscriptions` | Bearer JWT (`users:read`) | List subscriptions (paginated, filterable by product) |
+| `PATCH` | `/admin/subscriptions/{id}` | Bearer JWT (`users:read`) | Update plan / status / seat count |
+| `DELETE` | `/admin/subscriptions/{id}` | Bearer JWT (`users:read`) | Delete subscription |
+| `GET`  | `/admin/products` | Bearer JWT (`users:read`) | List products |
+| `GET`  | `/admin/plans` | Bearer JWT (`users:read`) | List plans (optionally filtered by `?product=<slug>`) |
+| `POST` | `/admin/plans` | Bearer JWT (`users:read`) | Create plan |
+| `DELETE` | `/admin/plans/{id}` | Bearer JWT (`users:read`) | Delete plan |
 | `GET`  | `/openapi.yaml` | — | OpenAPI spec (YAML) |
 | `GET`  | `/openapi.json` | — | OpenAPI spec (JSON) |
 | `GET`  | `/docs` | — | Swagger UI |
@@ -106,16 +135,21 @@ Returns `204 No Content`.
 }
 ```
 
-Returns `200 OK`. The JWT carries `roles` and `permissions` claims:
+Returns `200 OK`. The JWT carries `roles`, `permissions`, and `subscriptions` claims:
 
 ```json
 {
   "token": "<jwt>",
   "user": { "id": "...", "email": "...", "username": "...", "is_active": true, "..." },
   "roles": ["user"],
-  "permissions": []
+  "permissions": [],
+  "subscriptions": {
+    "clann": { "tier": "family", "status": "active", "seat_count": 4 }
+  }
 }
 ```
+
+The `subscriptions` map is keyed by product slug. Users with no paid subscription receive an empty map (treated as Individual free by downstream services). Downstream services can read plan limits from the JWT without an extra DB call; the user must re-login after a plan change for the JWT to reflect the new state.
 
 ---
 
@@ -165,6 +199,63 @@ Returns `204 No Content`. If the account is not yet active (email confirmation n
 
 ---
 
+### GET /subscriptions/current?product=\<slug\>
+
+Requires `Authorization: Bearer <token>`. Returns the caller's active or trialing subscription for the given product slug (e.g. `clann`). When no subscription row exists, a synthetic Individual (free) response is returned so clients never need to special-case a 404.
+
+```json
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "product": "clann",
+  "plan": "individual",
+  "status": "active",
+  "seat_count": 1
+}
+```
+
+---
+
+### POST /subscriptions/checkout
+
+Requires `Authorization: Bearer <token>`. Initiates a hosted checkout session with Stripe or PayPal. Returns a redirect URL.
+
+```json
+{
+  "product": "clann",
+  "plan": "family",
+  "provider": "stripe",
+  "seat_count": 4
+}
+```
+
+Returns `200 OK`:
+
+```json
+{ "url": "https://checkout.stripe.com/..." }
+```
+
+---
+
+### POST /subscriptions/portal
+
+Requires `Authorization: Bearer <token>`. Creates a Stripe Customer Portal session so the user can manage billing, change plan, or cancel. The caller must have an existing Stripe subscription.
+
+Returns `200 OK`:
+
+```json
+{ "url": "https://billing.stripe.com/..." }
+```
+
+---
+
+### POST /webhooks/stripe / POST /webhooks/paypal
+
+Webhook endpoints for Stripe and PayPal lifecycle events (subscription activated, renewed, cancelled, etc.). Stripe events are verified using the `Stripe-Signature` header and `STRIPE_WEBHOOK_SECRET`; PayPal events are verified via PayPal's verification API.
+
+Both return `200 OK` on success, `401` on signature failure, `500` on handler error (so the provider retries).
+
+---
+
 ### GET /health
 
 Requires `Authorization: Bearer <token>` with the `health:read` permission (admin only).
@@ -183,7 +274,7 @@ Two roles are seeded at migration time:
 
 | Role | Permissions |
 |------|-------------|
-| `admin` | `health:read`, `users:change_any_password` |
+| `admin` | `health:read`, `users:change_any_password`, `users:read`, `users:write`, and all collection permissions |
 | `user` | _(none)_ |
 
 Every new user is automatically assigned the `user` role. To promote a user to admin, insert a row into `user_roles`:
@@ -221,7 +312,13 @@ The API will be available at `http://localhost:8081`.
 > psql "postgresql://app_user:app_password@localhost:5433/user_management" \
 >   -f migrations/002_email_confirmation.sql \
 >   -f migrations/003_rbac.sql \
->   -f migrations/004_collection_permissions.sql
+>   -f migrations/004_collection_permissions.sql \
+>   -f migrations/005_products.sql \
+>   -f migrations/006_subscriptions.sql \
+>   -f migrations/007_grandfather_subscriptions.sql \
+>   -f migrations/008_admin_user_permissions.sql \
+>   -f migrations/009_comad_product.sql \
+>   -f migrations/010_plans.sql
 > ```
 
 ### Production deployment
@@ -276,6 +373,12 @@ psql "$DATABASE_URL" -f migrations/001_initial.sql
 psql "$DATABASE_URL" -f migrations/002_email_confirmation.sql
 psql "$DATABASE_URL" -f migrations/003_rbac.sql
 psql "$DATABASE_URL" -f migrations/004_collection_permissions.sql
+psql "$DATABASE_URL" -f migrations/005_products.sql
+psql "$DATABASE_URL" -f migrations/006_subscriptions.sql
+psql "$DATABASE_URL" -f migrations/007_grandfather_subscriptions.sql
+psql "$DATABASE_URL" -f migrations/008_admin_user_permissions.sql
+psql "$DATABASE_URL" -f migrations/009_comad_product.sql
+psql "$DATABASE_URL" -f migrations/010_plans.sql
 
 # 3. Run
 cargo run
@@ -339,6 +442,18 @@ All configuration is via environment variables (or a `.env` file):
 | `APP_BASE_URL` | — | Default base URL used to build confirmation and reset links |
 | `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for MailHog) |
 | `ALLOWED_APP_URLS` | — | Comma-separated allowlist of `app_url` values accepted in `POST /users` and `POST /auth/password-reset/request` (see Multi-tenant below) |
+| `CLANN_APP_URL` | — | Base URL of the Clann front-end; used to build checkout success/cancel and portal return URLs |
+| `STRIPE_SECRET_KEY` | — | Stripe secret key; omit to disable Stripe (supports `_FILE`) |
+| `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook signing secret for `POST /webhooks/stripe` |
+| `STRIPE_PRICE_CLANN_FAMILY_BASE` | — | Stripe Price ID for the Clann Family plan base charge |
+| `STRIPE_PRICE_CLANN_FAMILY_SEAT` | — | Stripe Price ID for each additional Family seat |
+| `STRIPE_PRICE_CLANN_PROFESSIONAL` | — | Stripe Price ID for the Clann Professional plan |
+| `PAYPAL_CLIENT_ID` | — | PayPal app client ID; omit to disable PayPal (supports `_FILE`) |
+| `PAYPAL_CLIENT_SECRET` | — | PayPal app client secret (supports `_FILE`) |
+| `PAYPAL_PLAN_CLANN_FAMILY` | — | PayPal billing plan ID for Clann Family |
+| `PAYPAL_PLAN_CLANN_PROFESSIONAL` | — | PayPal billing plan ID for Clann Professional |
+| `PAYPAL_WEBHOOK_ID` | — | PayPal webhook ID used for signature verification |
+| `PAYPAL_SANDBOX` | `false` | Set `true` to use PayPal sandbox endpoints |
 
 #### Docker secrets
 
@@ -442,5 +557,11 @@ Migrations are applied in order:
 | `002_email_confirmation.sql` | Adds `confirmation_token` columns to `users` |
 | `003_rbac.sql` | `roles`, `permissions`, `role_permissions`, `user_roles`; seeds `admin` and `user` roles |
 | `004_collection_permissions.sql` | Seeds collection permissions and roles: `collection_admin`, `curator`, `registrar` |
+| `005_products.sql` | `products` table; seeds the `clann` product |
+| `006_subscriptions.sql` | `subscriptions`, `subscription_seats` tables with indexes |
+| `007_grandfather_subscriptions.sql` | Seeds all existing users with an Individual (free) Clann subscription |
+| `008_admin_user_permissions.sql` | Adds `users:read` and `users:write` permissions; grants them to `admin` role |
+| `009_comad_product.sql` | Seeds the `comad` product |
+| `010_plans.sql` | Adds `plans` table; seeds default plans for `clann` and `comad` |
 
 In production, migrations are applied automatically by the `migrate` service on each deploy (idempotent — already-applied files are skipped). For local development without Docker, apply them manually with `psql` as shown above.

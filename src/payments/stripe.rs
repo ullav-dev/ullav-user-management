@@ -272,6 +272,12 @@ async fn on_checkout_completed(state: &AppState, obj: &serde_json::Value) -> Res
     log::info!(
         "Stripe subscription activated: user={user_id} product={product} plan={plan} status={status}"
     );
+
+    if product == "clann" {
+        db::ensure_comad_individual(&state.pool, user_id).await?;
+        log::info!("Bundled Comad Individual subscription ensured for user={user_id}");
+    }
+
     Ok(())
 }
 

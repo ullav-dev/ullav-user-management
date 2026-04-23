@@ -258,6 +258,12 @@ async fn on_subscription_activated(
     log::info!(
         "PayPal subscription activated: sub={subscription_id} user={user_id} plan={plan}"
     );
+
+    if product == "clann" {
+        db::ensure_comad_individual(&state.pool, user_id).await?;
+        log::info!("Bundled Comad Individual subscription ensured for user={user_id}");
+    }
+
     Ok(())
 }
 

@@ -430,6 +430,23 @@ pub async fn cancel_subscription(
     Ok(())
 }
 
+/// Ensure the user has an active Comad Individual subscription, inserting one
+/// if none exists. Idempotent — safe to call on every Clann activation.
+pub async fn ensure_comad_individual(pool: &Pool, user_id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO subscriptions (user_id, product_id, plan, status, seat_count)
+             SELECT $1, p.id, 'individual', 'active', 1
+             FROM products p
+             WHERE p.slug = 'comad'
+             ON CONFLICT DO NOTHING",
+            &[&user_id],
+        )
+        .await?;
+    Ok(())
+}
+
 /// Update only the status of a subscription (e.g. active → past_due).
 pub async fn set_subscription_status(
     pool: &Pool,

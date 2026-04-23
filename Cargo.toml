@@ -28,6 +28,9 @@ env_logger = "0.11"
 lettre = { version = "0.11", features = ["tokio1", "smtp-transport", "native-tls", "tokio1-native-tls"] }
 maxminddb = "0.27"
 actix-cors = "0.7"
+reqwest = { version = "0.12", features = ["json"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }

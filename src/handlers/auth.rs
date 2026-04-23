@@ -6,8 +6,9 @@ use crate::{
         PasswordResetConfirm, PasswordResetRequest,
     },
     utils::{
+        app_url::resolve_app_url,
         email::send_password_reset_email,
-        jwt::{create_jwt, decode_jwt, Claims},
+        jwt::{create_jwt, decode_jwt, Claims, SubscriptionClaim},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
     AppState,
@@ -15,6 +16,7 @@ use crate::{
 use actix_web::{get, post, put, web, HttpMessage, HttpRequest, HttpResponse};
 use chrono::Utc;
 use deadpool_postgres::Pool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// `POST /auth/login` — Authenticate a user and return a JWT.
@@ -36,12 +38,29 @@ pub async fn login(
 
     let (roles, permissions) =
         db::get_user_roles_and_permissions(&state.pool, user.id).await?;
+
+    // Build subscription claims from the DB — keyed by product slug.
+    // Users with no subscription rows get an empty map (treated as Individual by clients).
+    let raw_subs = db::get_all_user_subscriptions(&state.pool, user.id).await?;
+    let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
+        .into_iter()
+        .map(|s| {
+            let claim = SubscriptionClaim {
+                tier: s.plan.clone(),
+                status: s.status.clone(),
+                seat_count: if s.seat_count > 1 { Some(s.seat_count) } else { None },
+            };
+            (s.product_slug, claim)
+        })
+        .collect();
+
     let token = create_jwt(
         user.id,
         &state.jwt_secret,
         state.jwt_ttl_hours,
         roles.clone(),
         permissions.clone(),
+        subscriptions,
     )?;
     let response = LoginResponse {
         token,
@@ -111,6 +130,12 @@ pub async fn request_password_reset(
     state: web::Data<AppState>,
     body: web::Json<PasswordResetRequest>,
 ) -> Result<HttpResponse, AppError> {
+    let base_url = resolve_app_url(
+        body.app_url.as_deref(),
+        &state.allowed_app_urls,
+        &state.app_base_url,
+    )?;
+
     // Silently ignore unknown emails to prevent enumeration.
     if let Ok(user) = db::get_user_by_email(&state.pool, &body.email).await {
         let token = generate_secure_token();
@@ -122,7 +147,7 @@ pub async fn request_password_reset(
                 mailer,
                 &state.smtp_from,
                 &body.email,
-                &state.app_base_url,
+                &base_url,
                 &token,
             )
             .await
@@ -202,6 +227,9 @@ pub async fn confirm_password_reset(
     let new_hash = hash_password(&body.new_password)?;
     db::update_password(&state.pool, record.user_id, &new_hash).await?;
     db::consume_reset_token(&state.pool, &body.token).await?;
+    // Activate the user if they haven't confirmed their email yet —
+    // a successful password reset is sufficient proof of email ownership.
+    db::activate_user(&state.pool, record.user_id).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

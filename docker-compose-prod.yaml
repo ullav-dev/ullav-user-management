@@ -1,0 +1,80 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-colin}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: ${DATABASE_NAME:-user_management}
+    secrets:
+      - db_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ullav-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-colin} -d ${DATABASE_NAME:-user_management}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  migrate:
+    image: postgres:16-alpine
+    env_file: .env.prod
+    secrets:
+      - db_password
+    volumes:
+      - ./migrations:/migrations:ro
+      - ./scripts/migrate.sh:/migrate.sh:ro
+    entrypoint: ["/bin/sh", "/migrate.sh"]
+    networks:
+      - ullav-net
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    image: ghcr.io/ullav-dev/ullav-user-management:latest
+    container_name: user-management
+    init: true
+    env_file: .env.prod
+    environment:
+      # Secrets injected via _FILE convention — values read from /run/secrets/*
+      DATABASE_URL_FILE: /run/secrets/database_url
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    secrets:
+      - database_url
+      - jwt_secret
+      - smtp_password
+      - admin_password
+    networks:
+      - ullav-net
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+networks:
+  ullav-net:
+    external: true
+
+volumes:
+  postgres_data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  database_url:
+    file: ./secrets/database_url.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  smtp_password:
+    file: ./secrets/smtp_password.txt
+  admin_password:
+    file: ./secrets/admin_password.txt

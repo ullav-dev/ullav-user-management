@@ -1,6 +1,11 @@
-FROM rust:1.86-slim AS builder
+FROM rust:1.88-slim AS builder
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Cache dependencies
 COPY Cargo.toml Cargo.lock ./
@@ -10,6 +15,7 @@ RUN rm -f target/release/deps/user_management*
 
 # Build the real binary
 COPY src ./src
+COPY openapi.yaml ./
 RUN cargo build --release
 
 # --- runtime stage ---

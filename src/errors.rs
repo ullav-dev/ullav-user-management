@@ -35,6 +35,9 @@ pub enum AppError {
 
     #[error("email error: {0}")]
     Email(String),
+
+    #[error("payment provider error: {0}")]
+    PaymentProvider(String),
 }
 
 impl actix_web::ResponseError for AppError {
@@ -47,6 +50,7 @@ impl actix_web::ResponseError for AppError {
             AppError::InvalidToken => StatusCode::UNAUTHORIZED,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::PaymentProvider(_) => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

@@ -34,7 +34,15 @@ pub async fn create_user(
     )?;
 
     let hash = hash_password(&body.password)?;
-    let user = db::create_user(&state.pool, &body.email, &body.username, &hash).await?;
+    let user = db::create_user(
+        &state.pool,
+        &body.email,
+        &body.username,
+        &hash,
+        body.first_name.as_deref(),
+        body.last_name.as_deref(),
+    )
+    .await?;
 
     let token = generate_secure_token();
     let expires_at = Utc::now() + Duration::minutes(state.confirmation_token_ttl_minutes);

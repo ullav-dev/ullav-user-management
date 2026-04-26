@@ -13,15 +13,17 @@ pub async fn create_user(
     email: &str,
     username: &str,
     password_hash: &str,
+    first_name: Option<&str>,
+    last_name: Option<&str>,
 ) -> Result<User, AppError> {
     let client = pool.get().await?;
     let row = client
         .query_one(
-            "INSERT INTO users (email, username, password_hash, is_active)
-             VALUES ($1, $2, $3, FALSE)
-             RETURNING id, email, username, password_hash, is_active, created_at, updated_at,
-                       confirmation_token, confirmation_token_expires_at",
-            &[&email, &username, &password_hash],
+            "INSERT INTO users (email, username, password_hash, is_active, first_name, last_name)
+             VALUES ($1, $2, $3, FALSE, $4, $5)
+             RETURNING id, email, username, password_hash, is_active, first_name, last_name,
+                       created_at, updated_at, confirmation_token, confirmation_token_expires_at",
+            &[&email, &username, &password_hash, &first_name, &last_name],
         )
         .await
         .map_err(|e| {
@@ -42,8 +44,8 @@ pub async fn get_user_by_id(pool: &Pool, id: Uuid) -> Result<User, AppError> {
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT id, email, username, password_hash, is_active, created_at, updated_at,
-                    confirmation_token, confirmation_token_expires_at
+            "SELECT id, email, username, password_hash, is_active, first_name, last_name,
+                    created_at, updated_at, confirmation_token, confirmation_token_expires_at
              FROM users WHERE id = $1",
             &[&id],
         )
@@ -58,8 +60,8 @@ pub async fn get_user_by_email(pool: &Pool, email: &str) -> Result<User, AppErro
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT id, email, username, password_hash, is_active, created_at, updated_at,
-                    confirmation_token, confirmation_token_expires_at
+            "SELECT id, email, username, password_hash, is_active, first_name, last_name,
+                    created_at, updated_at, confirmation_token, confirmation_token_expires_at
              FROM users WHERE email = $1",
             &[&email],
         )
@@ -173,8 +175,8 @@ pub async fn get_user_by_confirmation_token(
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT id, email, username, password_hash, is_active, created_at, updated_at,
-                    confirmation_token, confirmation_token_expires_at
+            "SELECT id, email, username, password_hash, is_active, first_name, last_name,
+                    created_at, updated_at, confirmation_token, confirmation_token_expires_at
              FROM users WHERE confirmation_token = $1",
             &[&token],
         )
@@ -505,6 +507,8 @@ fn row_to_user(row: &tokio_postgres::Row) -> User {
         username: row.get("username"),
         password_hash: row.get("password_hash"),
         is_active: row.get("is_active"),
+        first_name: row.get("first_name"),
+        last_name: row.get("last_name"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         confirmation_token: row.get("confirmation_token"),

@@ -138,6 +138,8 @@ pub struct User {
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub is_active: bool,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing)]
@@ -153,6 +155,8 @@ pub struct UserResponse {
     pub email: String,
     pub username: String,
     pub is_active: bool,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -164,6 +168,8 @@ impl From<User> for UserResponse {
             email: u.email,
             username: u.username,
             is_active: u.is_active,
+            first_name: u.first_name,
+            last_name: u.last_name,
             created_at: u.created_at,
             updated_at: u.updated_at,
         }
@@ -176,6 +182,8 @@ pub struct CreateUserRequest {
     pub email: String,
     pub username: String,
     pub password: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
     /// Base URL of the calling application, used to build the confirmation-email link.
     /// Must be present in `ALLOWED_APP_URLS` when that variable is configured.
     /// Ignored when `ALLOWED_APP_URLS` is not set; falls back to `APP_BASE_URL`.

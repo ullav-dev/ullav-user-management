@@ -179,6 +179,16 @@ async fn activate_by_token(pool: &Pool, token: &str) -> Result<HttpResponse, App
 
     if !user.is_active {
         db::activate_user(pool, user.id).await?;
+
+        // Provision default individual subscriptions for all products.
+        // Conflict errors are silently ignored (idempotent re-confirmation).
+        for product in ["clann", "comad"] {
+            match db::admin_create_subscription(pool, user.id, product, "individual", "active", 1).await {
+                Ok(_) => {}
+                Err(AppError::Conflict) => {}
+                Err(e) => log::error!("Failed to provision {product} subscription for user {}: {e}", user.id),
+            }
+        }
     }
 
     Ok(HttpResponse::NoContent().finish())

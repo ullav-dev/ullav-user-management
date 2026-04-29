@@ -36,7 +36,7 @@ pub async fn login(
         return Err(AppError::InvalidCredentials);
     }
 
-    let (roles, permissions) =
+    let (roles, mut permissions) =
         db::get_user_roles_and_permissions(&state.pool, user.id).await?;
 
     // Build subscription claims from the DB — keyed by product slug.
@@ -52,6 +52,17 @@ pub async fn login(
             (s.product_slug, claim)
         })
         .collect();
+
+    // Grant teams:create to users with an active/trialing Family, Professional, or Enterprise
+    // Clann subscription — without requiring the admin role to manually assign the permission.
+    let clann_eligible = subscriptions.get("clann").map_or(false, |s| {
+        matches!(s.status.as_str(), "active" | "trialing")
+            && matches!(s.tier.as_str(), "family" | "professional" | "enterprise")
+    });
+    if clann_eligible && !permissions.contains(&"teams:create".to_string()) {
+        permissions.push("teams:create".to_string());
+        permissions.sort();
+    }
 
     // Build team claims — only active memberships, keyed by team UUID string.
     let raw_teams = db::get_user_active_teams(&state.pool, user.id).await?;

@@ -317,6 +317,17 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::subscriptions::get_current_subscription)
                     .service(handlers::subscriptions::create_checkout_session)
                     .service(handlers::subscriptions::create_portal_session)
+                    // Teams — permission-checked inside handlers; invite accept/decline registered
+                    // before /{id} routes so static "invitations" segment wins over UUID param.
+                    .service(handlers::teams::list_my_teams)
+                    .service(handlers::teams::accept_invitation)
+                    .service(handlers::teams::decline_invitation)
+                    .service(handlers::teams::create_team)
+                    .service(handlers::teams::get_team)
+                    .service(handlers::teams::update_team)
+                    .service(handlers::teams::delete_team)
+                    .service(handlers::teams::invite_member)
+                    .service(handlers::teams::remove_member)
                     // Health — requires `health:read`; use /health prefix to isolate
                     .service(
                         web::scope("/health")
@@ -326,7 +337,7 @@ async fn main() -> std::io::Result<()> {
                             ))
                             .service(handlers::health::health_scoped),
                     )
-                    // Admin user/role/subscription management — requires `users:read`
+                    // Admin user/role/subscription/team management — requires `users:read`
                     .service(
                         web::scope("/admin")
                             .wrap(middleware::auth::AuthMiddleware::require(
@@ -358,7 +369,15 @@ async fn main() -> std::io::Result<()> {
                             // Plans
                             .service(handlers::admin::list_plans)
                             .service(handlers::admin::create_plan)
-                            .service(handlers::admin::delete_plan),
+                            .service(handlers::admin::delete_plan)
+                            // Teams
+                            .service(handlers::admin::list_teams)
+                            .service(handlers::admin::create_team)
+                            .service(handlers::admin::get_team)
+                            .service(handlers::admin::update_team)
+                            .service(handlers::admin::delete_team)
+                            .service(handlers::admin::add_team_member)
+                            .service(handlers::admin::remove_team_member),
                     ),
             )
             // Webhook endpoints — no auth, provider-signed payloads

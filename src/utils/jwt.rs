@@ -20,6 +20,17 @@ pub struct SubscriptionClaim {
     pub seat_count: Option<i16>,
 }
 
+/// Per-team data embedded in the JWT.
+///
+/// Keyed by team UUID string in the `teams` claim map.
+/// Only active memberships are included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamClaim {
+    pub name: String,
+    /// Role of the token holder in this team: `"owner"`, `"leader"`, or `"member"`.
+    pub role: String,
+}
+
 /// JWT claims embedded in the token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -34,9 +45,13 @@ pub struct Claims {
     /// Permissions granted to the user (union of all role permissions).
     pub permissions: Vec<String>,
     /// Active subscriptions keyed by product slug.
-    /// Defaults to an empty map so tokens issued before Phase 4 still decode.
+    /// Defaults to an empty map so tokens issued before subscriptions were added still decode.
     #[serde(default)]
     pub subscriptions: HashMap<String, SubscriptionClaim>,
+    /// Active team memberships keyed by team UUID string.
+    /// Defaults to an empty map so tokens issued before teams were added still decode.
+    #[serde(default)]
+    pub teams: HashMap<String, TeamClaim>,
 }
 
 /// Create a signed JWT for the given user id.
@@ -47,6 +62,7 @@ pub fn create_jwt(
     roles: Vec<String>,
     permissions: Vec<String>,
     subscriptions: HashMap<String, SubscriptionClaim>,
+    teams: HashMap<String, TeamClaim>,
 ) -> Result<String, AppError> {
     let now = Utc::now();
     let claims = Claims {
@@ -56,6 +72,7 @@ pub fn create_jwt(
         roles,
         permissions,
         subscriptions,
+        teams,
     };
 
     encode(

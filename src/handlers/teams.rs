@@ -1,0 +1,314 @@
+use crate::{
+    db,
+    errors::AppError,
+    models::{
+        CreateTeamRequest, InviteTeamMemberRequest, UpdateTeamRequest,
+    },
+    utils::{
+        app_url::resolve_app_url,
+        email::send_team_invitation_email,
+        jwt::Claims,
+        password::generate_secure_token,
+    },
+    AppState,
+};
+use actix_web::{delete, get, patch, post, web, HttpMessage, HttpRequest, HttpResponse};
+use chrono::{Duration, Utc};
+use uuid::Uuid;
+
+/// `GET /teams` — list teams the caller is an active member of.
+#[get("/teams")]
+pub async fn list_my_teams(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let teams = db::list_user_teams(&state.pool, user_id).await?;
+    Ok(HttpResponse::Ok().json(teams))
+}
+
+/// `POST /teams` — create a team; caller becomes owner. Requires `teams:create` permission.
+#[post("/teams")]
+pub async fn create_team(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<CreateTeamRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    if !claims.permissions.contains(&"teams:create".to_string()) {
+        return Err(AppError::Forbidden);
+    }
+    let owner_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+
+    if body.name.trim().is_empty() {
+        return Err(AppError::Validation("name must not be empty".into()));
+    }
+
+    let team_id = db::create_team(
+        &state.pool,
+        body.name.trim(),
+        body.description.as_deref(),
+        body.purpose.as_deref(),
+        body.avatar_url.as_deref(),
+        owner_id,
+    )
+    .await?;
+
+    let team = db::get_team_response(&state.pool, team_id).await?;
+    Ok(HttpResponse::Created().json(team))
+}
+
+/// `GET /teams/{id}` — get team details; caller must be an active member.
+#[get("/teams/{id}")]
+pub async fn get_team(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let team_id = path.into_inner();
+
+    require_active_member(&state, team_id, user_id).await?;
+
+    let team = db::get_team_response(&state.pool, team_id).await?;
+    Ok(HttpResponse::Ok().json(team))
+}
+
+/// `PATCH /teams/{id}` — update team details; owner or leader only.
+/// Only the owner may change the leader.
+#[patch("/teams/{id}")]
+pub async fn update_team(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<UpdateTeamRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let team_id = path.into_inner();
+
+    let (owner_id, leader_id) = db::get_team_ownership(&state.pool, team_id).await?;
+    let is_owner = user_id == owner_id;
+    let is_leader = user_id == leader_id;
+
+    if !is_owner && !is_leader {
+        return Err(AppError::Forbidden);
+    }
+
+    if body.leader_id.is_some() && !is_owner {
+        return Err(AppError::Forbidden);
+    }
+
+    // Validate that the proposed new leader is an active member.
+    if let Some(new_leader) = body.leader_id {
+        match db::get_team_membership(&state.pool, team_id, new_leader).await? {
+            Some(m) if m.status == "active" => {}
+            _ => return Err(AppError::Validation("proposed leader is not an active team member".into())),
+        }
+    }
+
+    db::update_team(
+        &state.pool,
+        team_id,
+        body.name.as_deref(),
+        body.description.as_deref(),
+        body.purpose.as_deref(),
+        body.avatar_url.as_deref(),
+        body.leader_id,
+    )
+    .await?;
+
+    let team = db::get_team_response(&state.pool, team_id).await?;
+    Ok(HttpResponse::Ok().json(team))
+}
+
+/// `DELETE /teams/{id}` — delete team; owner only.
+#[delete("/teams/{id}")]
+pub async fn delete_team(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let team_id = path.into_inner();
+
+    let (owner_id, _) = db::get_team_ownership(&state.pool, team_id).await?;
+    if user_id != owner_id {
+        return Err(AppError::Forbidden);
+    }
+
+    db::delete_team(&state.pool, team_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /teams/{id}/invitations` — invite a user by email; owner or leader only.
+#[post("/teams/{id}/invitations")]
+pub async fn invite_member(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<InviteTeamMemberRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let inviter_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let team_id = path.into_inner();
+
+    let (owner_id, leader_id) = db::get_team_ownership(&state.pool, team_id).await?;
+    if inviter_id != owner_id && inviter_id != leader_id {
+        return Err(AppError::Forbidden);
+    }
+
+    let base_url = resolve_app_url(
+        body.app_url.as_deref(),
+        &state.allowed_app_urls,
+        &state.app_base_url,
+    )?;
+
+    let invitee = db::get_user_by_email(&state.pool, &body.email).await?;
+
+    if db::get_team_membership(&state.pool, team_id, invitee.id).await?.is_some() {
+        return Err(AppError::Conflict);
+    }
+
+    let token = generate_secure_token();
+    let expires_at = Utc::now() + Duration::minutes(state.confirmation_token_ttl_minutes);
+
+    db::invite_team_member(&state.pool, team_id, invitee.id, inviter_id, &token, expires_at).await?;
+
+    let team = db::get_team_response(&state.pool, team_id).await?;
+
+    if let Some(mailer) = &state.mailer {
+        let inviter_username = db::get_user_by_id(&state.pool, inviter_id)
+            .await
+            .map(|u| u.username)
+            .unwrap_or_else(|_| "A team member".into());
+
+        if let Err(e) = send_team_invitation_email(
+            mailer,
+            &state.smtp_from,
+            &invitee.email,
+            &team.name,
+            &inviter_username,
+            &base_url,
+            &token,
+        )
+        .await
+        {
+            log::error!("Failed to send team invitation email to {}: {}", invitee.email, e);
+        }
+    } else {
+        log::info!(
+            "Team invitation token for {} to join team {} — token: {}",
+            invitee.email,
+            team.name,
+            token
+        );
+    }
+
+    Ok(HttpResponse::Created().json(team))
+}
+
+/// `DELETE /teams/{id}/members/{user_id}` — remove a member.
+/// Owner or leader can remove others; any active member may remove themselves.
+/// The owner may not leave their own team.
+#[delete("/teams/{id}/members/{user_id}")]
+pub async fn remove_member(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, target_user_id) = path.into_inner();
+
+    let (owner_id, leader_id) = db::get_team_ownership(&state.pool, team_id).await?;
+
+    let is_self = caller_id == target_user_id;
+    let is_owner = caller_id == owner_id;
+    let is_leader = caller_id == leader_id;
+
+    if !is_self && !is_owner && !is_leader {
+        return Err(AppError::Forbidden);
+    }
+
+    // The owner may not be removed — they must transfer ownership or delete the team.
+    if target_user_id == owner_id {
+        return Err(AppError::Validation(
+            "the team owner cannot be removed; transfer ownership or delete the team".into(),
+        ));
+    }
+
+    db::remove_team_member(&state.pool, team_id, target_user_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /teams/invitations/{token}/accept` — accept a team invitation.
+#[post("/teams/invitations/{token}/accept")]
+pub async fn accept_invitation(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let token = path.into_inner();
+
+    let member = db::get_team_member_by_token(&state.pool, &token).await?;
+
+    if member.user_id != caller_id {
+        return Err(AppError::Forbidden);
+    }
+    if let Some(expires_at) = member.invite_token_expires_at {
+        if expires_at < Utc::now() {
+            return Err(AppError::InvalidToken);
+        }
+    }
+
+    db::accept_team_invitation(&state.pool, member.id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /teams/invitations/{token}/decline` — decline a team invitation.
+#[post("/teams/invitations/{token}/decline")]
+pub async fn decline_invitation(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let token = path.into_inner();
+
+    let member = db::get_team_member_by_token(&state.pool, &token).await?;
+
+    if member.user_id != caller_id {
+        return Err(AppError::Forbidden);
+    }
+
+    db::decline_team_invitation(&state.pool, member.id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn claims_from_req(req: &HttpRequest) -> Result<Claims, AppError> {
+    req.extensions()
+        .get::<Claims>()
+        .cloned()
+        .ok_or(AppError::InvalidToken)
+}
+
+async fn require_active_member(
+    state: &AppState,
+    team_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    match db::get_team_membership(&state.pool, team_id, user_id).await? {
+        Some(m) if m.status == "active" => Ok(()),
+        Some(_) => Err(AppError::Forbidden),
+        None => Err(AppError::Forbidden),
+    }
+}

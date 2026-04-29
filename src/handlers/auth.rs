@@ -8,7 +8,7 @@ use crate::{
     utils::{
         app_url::resolve_app_url,
         email::send_password_reset_email,
-        jwt::{create_jwt, decode_jwt, Claims, SubscriptionClaim},
+        jwt::{create_jwt, decode_jwt, Claims, SubscriptionClaim, TeamClaim},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
     AppState,
@@ -40,7 +40,6 @@ pub async fn login(
         db::get_user_roles_and_permissions(&state.pool, user.id).await?;
 
     // Build subscription claims from the DB — keyed by product slug.
-    // Users with no subscription rows get an empty map (treated as Individual by clients).
     let raw_subs = db::get_all_user_subscriptions(&state.pool, user.id).await?;
     let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
         .into_iter()
@@ -54,6 +53,13 @@ pub async fn login(
         })
         .collect();
 
+    // Build team claims — only active memberships, keyed by team UUID string.
+    let raw_teams = db::get_user_active_teams(&state.pool, user.id).await?;
+    let teams: HashMap<String, TeamClaim> = raw_teams
+        .into_iter()
+        .map(|(id, name, role)| (id, TeamClaim { name, role }))
+        .collect();
+
     let token = create_jwt(
         user.id,
         &state.jwt_secret,
@@ -61,6 +67,7 @@ pub async fn login(
         roles.clone(),
         permissions.clone(),
         subscriptions,
+        teams,
     )?;
     let response = LoginResponse {
         token,

@@ -309,6 +309,138 @@ pub struct CheckoutResponse {
     pub url: String,
 }
 
+// ── Teams ────────────────────────────────────────────────────────────────────
+
+/// Minimal user info embedded in team API responses.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamUserRef {
+    pub id: Uuid,
+    pub username: String,
+    pub email: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+}
+
+/// A team member as returned by API responses.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamMemberResponse {
+    pub id: Uuid,
+    pub user: TeamUserRef,
+    /// `invited` | `active` | `inactive`
+    pub status: String,
+    /// `owner` | `leader` | `member` — derived from the team's owner_id / leader_id columns.
+    pub role: String,
+    pub invited_at: DateTime<Utc>,
+    pub joined_at: Option<DateTime<Utc>>,
+}
+
+/// Full team representation including member list.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub purpose: Option<String>,
+    pub avatar_url: Option<String>,
+    pub owner: TeamUserRef,
+    pub leader: TeamUserRef,
+    pub members: Vec<TeamMemberResponse>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Lightweight team summary used in list endpoints (no member list).
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub avatar_url: Option<String>,
+    pub owner: TeamUserRef,
+    pub leader: TeamUserRef,
+    pub member_count: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Paginated list of teams returned by admin list endpoint.
+#[derive(Debug, Serialize)]
+pub struct TeamsPage {
+    pub teams: Vec<TeamSummary>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// Internal DB row for a team_members record — used for token lookups and auth checks.
+#[derive(Debug, Clone)]
+pub struct TeamMemberRow {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub user_id: Uuid,
+    pub status: String,
+    pub invite_token_expires_at: Option<DateTime<Utc>>,
+    pub invited_at: DateTime<Utc>,
+    pub joined_at: Option<DateTime<Utc>>,
+}
+
+/// Request body for creating a team (caller becomes the owner).
+#[derive(Debug, Deserialize)]
+pub struct CreateTeamRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub purpose: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+/// Request body for partially updating a team (owner/leader).
+#[derive(Debug, Deserialize)]
+pub struct UpdateTeamRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub purpose: Option<String>,
+    pub avatar_url: Option<String>,
+    /// Only the current owner may change the leader.
+    pub leader_id: Option<Uuid>,
+}
+
+/// Request body for inviting a user to a team by email.
+#[derive(Debug, Deserialize)]
+pub struct InviteTeamMemberRequest {
+    pub email: String,
+    /// Frontend base URL used to build the invitation link in the email.
+    pub app_url: Option<String>,
+}
+
+/// Admin request body for directly adding an active member (bypasses invite flow).
+#[derive(Debug, Deserialize)]
+pub struct AdminAddTeamMemberRequest {
+    pub user_id: Uuid,
+}
+
+/// Admin request body for creating a team with an explicit owner.
+#[derive(Debug, Deserialize)]
+pub struct AdminCreateTeamRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub purpose: Option<String>,
+    pub avatar_url: Option<String>,
+    pub owner_id: Uuid,
+}
+
+/// Admin request body for partially updating a team.
+#[derive(Debug, Deserialize)]
+pub struct AdminUpdateTeamRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub purpose: Option<String>,
+    pub avatar_url: Option<String>,
+    pub owner_id: Option<Uuid>,
+    pub leader_id: Option<Uuid>,
+}
+
+// ── Password reset tokens ─────────────────────────────────────────────────────
+
 /// A password-reset token row.
 #[derive(Debug, Clone)]
 pub struct PasswordResetToken {

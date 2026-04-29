@@ -111,3 +111,48 @@ pub async fn send_password_reset_email(
 
     Ok(())
 }
+
+/// Send an HTML team-invitation email with a link to the frontend invitation page.
+pub async fn send_team_invitation_email(
+    mailer: &AsyncSmtpTransport<Tokio1Executor>,
+    from: &str,
+    to_email: &str,
+    team_name: &str,
+    inviter_username: &str,
+    base_url: &str,
+    token: &str,
+) -> Result<(), AppError> {
+    let link = format!("{}/teams/invitations/{}", base_url, token);
+
+    let body = format!(
+        "<p><strong>{inviter}</strong> has invited you to join the team <strong>{team}</strong>.</p>\
+         <p>Click the link below to view and respond to this invitation:</p>\
+         <p><a href=\"{link}\">{link}</a></p>\
+         <p>This invitation will expire in 24 hours. If you did not expect this invitation, you can safely ignore this email.</p>",
+        inviter = inviter_username,
+        team = team_name,
+        link = link,
+    );
+
+    let email = Message::builder()
+        .from(
+            from.parse()
+                .map_err(|e: lettre::address::AddressError| AppError::Email(e.to_string()))?,
+        )
+        .to(
+            to_email
+                .parse()
+                .map_err(|e: lettre::address::AddressError| AppError::Email(e.to_string()))?,
+        )
+        .subject(format!("You've been invited to join {}", team_name))
+        .header(ContentType::TEXT_HTML)
+        .body(body)
+        .map_err(|e| AppError::Email(e.to_string()))?;
+
+    mailer
+        .send(email)
+        .await
+        .map_err(|e| AppError::Email(e.to_string()))?;
+
+    Ok(())
+}

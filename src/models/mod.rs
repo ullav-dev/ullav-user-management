@@ -412,6 +412,12 @@ pub struct InviteTeamMemberRequest {
     pub app_url: Option<String>,
 }
 
+/// Request body for resending a team invitation.
+#[derive(Debug, Deserialize)]
+pub struct ResendInviteRequest {
+    pub app_url: Option<String>,
+}
+
 /// Admin request body for directly adding an active member (bypasses invite flow).
 #[derive(Debug, Deserialize)]
 pub struct AdminAddTeamMemberRequest {

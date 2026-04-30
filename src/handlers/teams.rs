@@ -2,7 +2,7 @@ use crate::{
     db,
     errors::AppError,
     models::{
-        CreateTeamRequest, InviteTeamMemberRequest, UpdateTeamRequest,
+        CreateTeamRequest, InviteTeamMemberRequest, ResendInviteRequest, UpdateTeamRequest,
     },
     utils::{
         app_url::resolve_app_url,
@@ -289,6 +289,76 @@ pub async fn decline_invitation(
     }
 
     db::decline_team_invitation(&state.pool, member.id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /teams/{id}/members/{user_id}/resend-invite` — resend invitation email; owner or leader only.
+#[post("/teams/{id}/members/{user_id}/resend-invite")]
+pub async fn resend_invitation(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+    body: web::Json<ResendInviteRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, invitee_id) = path.into_inner();
+
+    let (owner_id, leader_id) = db::get_team_ownership(&state.pool, team_id).await?;
+    if caller_id != owner_id && caller_id != leader_id {
+        return Err(AppError::Forbidden);
+    }
+
+    let membership = db::get_team_membership(&state.pool, team_id, invitee_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    if membership.status != "invited" {
+        return Err(AppError::Validation("member is not in invited status".into()));
+    }
+
+    let base_url = resolve_app_url(
+        body.app_url.as_deref(),
+        &state.allowed_app_urls,
+        &state.app_base_url,
+    )?;
+
+    let new_token = generate_secure_token();
+    let new_expires_at = Utc::now() + Duration::minutes(state.confirmation_token_ttl_minutes);
+
+    db::refresh_invite_token(&state.pool, team_id, invitee_id, &new_token, new_expires_at).await?;
+
+    let team = db::get_team_response(&state.pool, team_id).await?;
+    let invitee = db::get_user_by_id(&state.pool, invitee_id).await?;
+
+    if let Some(mailer) = &state.mailer {
+        let inviter_username = db::get_user_by_id(&state.pool, caller_id)
+            .await
+            .map(|u| u.username)
+            .unwrap_or_else(|_| "A team member".into());
+
+        if let Err(e) = send_team_invitation_email(
+            mailer,
+            &state.smtp_from,
+            &invitee.email,
+            &team.name,
+            &inviter_username,
+            &base_url,
+            &new_token,
+        )
+        .await
+        {
+            log::error!("Failed to resend team invitation email to {}: {}", invitee.email, e);
+        }
+    } else {
+        log::info!(
+            "Resent team invitation token for {} to join team {} — token: {}",
+            invitee.email,
+            team.name,
+            new_token
+        );
+    }
+
     Ok(HttpResponse::NoContent().finish())
 }
 

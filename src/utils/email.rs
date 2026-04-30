@@ -122,7 +122,7 @@ pub async fn send_team_invitation_email(
     base_url: &str,
     token: &str,
 ) -> Result<(), AppError> {
-    let link = format!("{}/teams/invitations/{}", base_url, token);
+    let link = format!("{}/auth/team-invite?token={}", base_url, token);
 
     let body = format!(
         "<p><strong>{inviter}</strong> has invited you to join the team <strong>{team}</strong>.</p>\

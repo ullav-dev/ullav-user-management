@@ -1387,6 +1387,30 @@ pub async fn remove_team_member(
     Ok(())
 }
 
+/// Replace an invited member's token + expiry so a fresh invite email can be sent.
+/// Returns NotFound if the member is not in "invited" status.
+pub async fn refresh_invite_token(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    new_token: &str,
+    new_expires_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let updated = client
+        .execute(
+            "UPDATE team_members
+             SET invite_token = $3, invite_token_expires_at = $4, invited_at = NOW()
+             WHERE team_id = $1 AND user_id = $2 AND status = 'invited'",
+            &[&team_id, &user_id, &new_token, &new_expires_at],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
 /// Fetch all active team memberships for a user to embed in the JWT.
 /// Returns (team_id_string, name, role) tuples.
 pub async fn get_user_active_teams(

@@ -327,6 +327,7 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::teams::update_team)
                     .service(handlers::teams::delete_team)
                     .service(handlers::teams::invite_member)
+                    .service(handlers::teams::resend_invitation)
                     .service(handlers::teams::remove_member)
                     // Health — requires `health:read`; use /health prefix to isolate
                     .service(

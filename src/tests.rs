@@ -156,7 +156,7 @@ mod password_tests {
 
 #[cfg(test)]
 mod jwt_tests {
-    use crate::utils::jwt::{create_jwt, decode_jwt, SubscriptionClaim};
+    use crate::utils::jwt::{create_jwt, decode_jwt, SubscriptionClaim, TeamClaim};
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -164,7 +164,7 @@ mod jwt_tests {
     fn test_create_and_decode_jwt() {
         let id = Uuid::new_v4();
         let secret = "test_secret_key_12345";
-        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new())
+        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new(), HashMap::new())
             .expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
         assert_eq!(claims.sub, id.to_string());
@@ -173,7 +173,7 @@ mod jwt_tests {
     #[test]
     fn test_jwt_wrong_secret_fails() {
         let id = Uuid::new_v4();
-        let token = create_jwt(id, "secret_a", 1, vec![], vec![], HashMap::new())
+        let token = create_jwt(id, "secret_a", 1, vec![], vec![], HashMap::new(), HashMap::new())
             .expect("create_jwt should succeed");
         let result = decode_jwt(&token, "secret_b");
         assert!(result.is_err(), "decoding with wrong secret should fail");
@@ -192,7 +192,7 @@ mod jwt_tests {
                 seat_count: Some(5),
             },
         );
-        let token = create_jwt(id, secret, 1, vec![], vec![], subs)
+        let token = create_jwt(id, secret, 1, vec![], vec![], subs, HashMap::new())
             .expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
 
@@ -206,7 +206,7 @@ mod jwt_tests {
     fn test_jwt_no_subscriptions_returns_empty_map() {
         let id = Uuid::new_v4();
         let secret = "test_secret";
-        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new())
+        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new(), HashMap::new())
             .expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
         assert!(claims.subscriptions.is_empty(), "subscriptions map must be empty");
@@ -225,7 +225,7 @@ mod jwt_tests {
                 seat_count: None,
             },
         );
-        let token = create_jwt(id, secret, 1, vec![], vec![], subs)
+        let token = create_jwt(id, secret, 1, vec![], vec![], subs, HashMap::new())
             .expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
 
@@ -247,13 +247,45 @@ mod jwt_tests {
             "dam".into(),
             SubscriptionClaim { tier: "professional".into(), status: "trialing".into(), seat_count: None },
         );
-        let token = create_jwt(id, secret, 1, vec![], vec![], subs)
+        let token = create_jwt(id, secret, 1, vec![], vec![], subs, HashMap::new())
             .expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
 
         assert_eq!(claims.subscriptions.len(), 2);
         assert_eq!(claims.subscriptions["clann"].tier, "family");
         assert_eq!(claims.subscriptions["dam"].status, "trialing");
+    }
+
+    #[test]
+    fn test_jwt_team_claims_round_trip() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let mut teams = HashMap::new();
+        teams.insert(
+            Uuid::new_v4().to_string(),
+            TeamClaim { name: "Engineering".into(), role: "owner".into() },
+        );
+        teams.insert(
+            Uuid::new_v4().to_string(),
+            TeamClaim { name: "Design".into(), role: "member".into() },
+        );
+        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new(), teams)
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+
+        assert_eq!(claims.teams.len(), 2);
+        assert!(claims.teams.values().any(|t| t.name == "Engineering" && t.role == "owner"));
+        assert!(claims.teams.values().any(|t| t.name == "Design" && t.role == "member"));
+    }
+
+    #[test]
+    fn test_jwt_no_teams_returns_empty_map() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let token = create_jwt(id, secret, 1, vec![], vec![], HashMap::new(), HashMap::new())
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+        assert!(claims.teams.is_empty(), "teams map must be empty when no teams");
     }
 }
 

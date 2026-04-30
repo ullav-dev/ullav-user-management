@@ -2,7 +2,8 @@ use crate::{
     db,
     errors::AppError,
     models::{
-        AdminCreateSubscriptionRequest, AdminUpdateSubscriptionRequest, AdminUpdateUserRequest,
+        AdminAddTeamMemberRequest, AdminCreateSubscriptionRequest, AdminCreateTeamRequest,
+        AdminUpdateSubscriptionRequest, AdminUpdateTeamRequest, AdminUpdateUserRequest,
         CreatePermissionRequest, CreatePlanRequest, CreateRoleRequest,
     },
     AppState,
@@ -313,5 +314,117 @@ pub async fn delete_plan(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     db::delete_plan(&state.pool, *path).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ── Admin: Teams ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct TeamsQuery {
+    #[serde(default = "one")]
+    pub page: i64,
+    #[serde(default = "twenty")]
+    pub page_size: i64,
+    #[serde(default)]
+    pub search: String,
+}
+
+/// `GET /admin/teams` — paginated list of all teams.
+#[get("/teams")]
+pub async fn list_teams(
+    state: web::Data<AppState>,
+    query: web::Query<TeamsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let page = db::list_teams_paginated(&state.pool, query.page, query.page_size, &query.search).await?;
+    Ok(HttpResponse::Ok().json(page))
+}
+
+/// `POST /admin/teams` — create a team with an explicit owner.
+#[post("/teams")]
+pub async fn create_team(
+    state: web::Data<AppState>,
+    body: web::Json<AdminCreateTeamRequest>,
+) -> Result<HttpResponse, AppError> {
+    if body.name.trim().is_empty() {
+        return Err(AppError::Validation("name must not be empty".into()));
+    }
+    let team_id = db::create_team(
+        &state.pool,
+        body.name.trim(),
+        body.description.as_deref(),
+        body.purpose.as_deref(),
+        body.avatar_url.as_deref(),
+        body.owner_id,
+    )
+    .await?;
+    let team = db::get_team_response(&state.pool, team_id).await?;
+    Ok(HttpResponse::Created().json(team))
+}
+
+/// `GET /admin/teams/{id}` — full team detail including all members.
+#[get("/teams/{id}")]
+pub async fn get_team(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let team = db::get_team_response(&state.pool, *path).await?;
+    Ok(HttpResponse::Ok().json(team))
+}
+
+/// `PATCH /admin/teams/{id}` — update any team field, including owner.
+#[patch("/teams/{id}")]
+pub async fn update_team(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    body: web::Json<AdminUpdateTeamRequest>,
+) -> Result<HttpResponse, AppError> {
+    db::admin_update_team(
+        &state.pool,
+        *path,
+        body.name.as_deref(),
+        body.description.as_deref(),
+        body.purpose.as_deref(),
+        body.avatar_url.as_deref(),
+        body.owner_id,
+        body.leader_id,
+    )
+    .await?;
+    let team = db::get_team_response(&state.pool, *path).await?;
+    Ok(HttpResponse::Ok().json(team))
+}
+
+/// `DELETE /admin/teams/{id}` — delete a team and all its memberships.
+#[delete("/teams/{id}")]
+pub async fn delete_team(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    db::delete_team(&state.pool, *path).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /admin/teams/{id}/members` — directly add an active member (bypasses invite).
+#[post("/teams/{id}/members")]
+pub async fn add_team_member(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    body: web::Json<AdminAddTeamMemberRequest>,
+) -> Result<HttpResponse, AppError> {
+    let team_id = path.into_inner();
+    // Verify the team exists before trying to add a member.
+    db::get_team_ownership(&state.pool, team_id).await?;
+    db::add_team_member_active(&state.pool, team_id, body.user_id, body.user_id).await?;
+    let team = db::get_team_response(&state.pool, team_id).await?;
+    Ok(HttpResponse::Created().json(team))
+}
+
+/// `DELETE /admin/teams/{id}/members/{user_id}` — remove a member from a team.
+#[delete("/teams/{id}/members/{user_id}")]
+pub async fn remove_team_member(
+    state: web::Data<AppState>,
+    path: web::Path<(Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let (team_id, user_id) = path.into_inner();
+    db::remove_team_member(&state.pool, team_id, user_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

@@ -12,13 +12,32 @@ info:
     **Security:** All endpoints require HTTPS unless the client IP is localhost or whitelisted.
     Requests from geo-blocked countries are rejected with `403`. CORS headers are emitted when
     `CORS_ORIGINS` is configured.
-  version: 0.3.0
+
+    **Teams:** The Teams feature allows users with the `teams:create` permission to create teams,
+    invite members by email, and manage membership. Active team memberships are embedded in the JWT
+    at login under the `teams` claim (keyed by team UUID).
+  version: 0.4.0
 
 servers:
   - url: http://localhost:8081
     description: Local development
 
+tags:
+  - name: System
+    description: Service health
+  - name: Auth
+    description: Authentication and credential management
+  - name: Users
+    description: User account management
+  - name: Teams
+    description: Team creation and membership (JWT required)
+  - name: Admin
+    description: Administrative management (requires `users:read` permission)
+
 paths:
+
+  # ── System ──────────────────────────────────────────────────────────────────
+
   /health:
     get:
       summary: Health check
@@ -49,6 +68,8 @@ paths:
               example:
                 status: degraded
                 database: unavailable
+
+  # ── Users ────────────────────────────────────────────────────────────────────
 
   /users:
     post:
@@ -135,6 +156,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  # ── Auth ─────────────────────────────────────────────────────────────────────
 
   /auth/login:
     post:
@@ -295,6 +318,489 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  # ── Teams (user-facing) ───────────────────────────────────────────────────────
+
+  /teams:
+    get:
+      summary: List teams I am an active member of
+      operationId: listMyTeams
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Array of team summaries (may be empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TeamSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: Create a team
+      description: |
+        The caller becomes the owner and first active member. Requires the `teams:create` permission.
+        The leader defaults to the owner; use `PATCH /teams/{id}` to change it.
+      operationId: createTeam
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTeamRequest'
+            example:
+              name: Engineering
+              description: The engineering team
+              purpose: Build great software together
+      responses:
+        '201':
+          description: Team created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /teams/{id}:
+    get:
+      summary: Get team details
+      description: Returns the full team including all non-inactive members. Caller must be an active member.
+      operationId: getTeam
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      responses:
+        '200':
+          description: Team details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      summary: Update team details
+      description: |
+        Owner or leader may update `name`, `description`, `purpose`, and `avatar_url`.
+        Only the owner may change `leader_id`; the proposed leader must be an active member.
+      operationId: updateTeam
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTeamRequest'
+            example:
+              name: Platform Engineering
+              leader_id: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        '200':
+          description: Updated team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      summary: Delete a team
+      description: Owner only. Cascades to all memberships.
+      operationId: deleteTeam
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      responses:
+        '204':
+          description: Team deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /teams/{id}/invitations:
+    post:
+      summary: Invite a user to the team
+      description: |
+        Owner or leader may invite any registered user by email address. An invitation email is sent
+        containing a link to `{APP_BASE_URL}/teams/invitations/{token}`. The invitee must call
+        `POST /teams/invitations/{token}/accept` to become an active member.
+
+        Returns `409 Conflict` if the user already has a pending invitation or is an active member.
+      operationId: inviteTeamMember
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteTeamMemberRequest'
+            example:
+              email: bob@example.com
+              app_url: https://app.example.com
+      responses:
+        '201':
+          description: Invitation sent; returns updated team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Team or invitee email not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /teams/{id}/members/{user_id}:
+    delete:
+      summary: Remove a member from the team
+      description: |
+        Owner or leader may remove any member. Any active member may remove themselves (self-leave).
+        The team owner cannot be removed — transfer ownership or delete the team instead.
+      operationId: removeTeamMember
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the member to remove
+      responses:
+        '204':
+          description: Member removed
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /teams/invitations/{token}/accept:
+    post:
+      summary: Accept a team invitation
+      description: |
+        The caller must be the user who was invited (verified against the token). Sets membership
+        status to `active`. The token is consumed and cannot be reused.
+      operationId: acceptTeamInvitation
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/inviteToken'
+      responses:
+        '204':
+          description: Invitation accepted; caller is now an active team member
+        '401':
+          description: Token not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /teams/invitations/{token}/decline:
+    post:
+      summary: Decline a team invitation
+      description: |
+        The caller must be the user who was invited. Removes the pending membership row entirely,
+        allowing the user to be re-invited in future.
+      operationId: declineTeamInvitation
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/inviteToken'
+      responses:
+        '204':
+          description: Invitation declined
+        '401':
+          description: Token not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Admin: Teams ──────────────────────────────────────────────────────────────
+
+  /admin/teams:
+    get:
+      summary: List all teams (paginated)
+      operationId: adminListTeams
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: search
+          in: query
+          description: Filter by team name or owner username (case-insensitive, partial match)
+          schema:
+            type: string
+            default: ''
+      responses:
+        '200':
+          description: Paginated list of teams
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamsPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: Create a team with an explicit owner
+      description: Creates a team and adds the specified owner as the first active member.
+      operationId: adminCreateTeam
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminCreateTeamRequest'
+            example:
+              name: Engineering
+              description: The engineering team
+              owner_id: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        '201':
+          description: Team created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/teams/{id}:
+    get:
+      summary: Get full team detail
+      operationId: adminGetTeam
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      responses:
+        '200':
+          description: Team details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      summary: Update any team field, including owner
+      operationId: adminUpdateTeam
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminUpdateTeamRequest'
+      responses:
+        '200':
+          description: Updated team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      summary: Delete a team
+      operationId: adminDeleteTeam
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      responses:
+        '204':
+          description: Team deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/teams/{id}/members:
+    post:
+      summary: Directly add an active member (bypasses invite flow)
+      operationId: adminAddTeamMember
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminAddTeamMemberRequest'
+            example:
+              user_id: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        '201':
+          description: Member added; returns updated team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/teams/{id}/members/{user_id}:
+    delete:
+      summary: Remove a member from a team
+      operationId: adminRemoveTeamMember
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the member to remove
+      responses:
+        '204':
+          description: Member removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -302,7 +808,27 @@ components:
       scheme: bearer
       bearerFormat: JWT
 
+  parameters:
+    teamId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID of the team
+    inviteToken:
+      name: token
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 64-character hex invitation token from the invitation email
+
   schemas:
+
+    # ── System ──────────────────────────────────────────────────────────────────
+
     HealthResponse:
       type: object
       properties:
@@ -312,6 +838,8 @@ components:
         database:
           type: string
           enum: [ok, error, unavailable]
+
+    # ── Users / Auth ─────────────────────────────────────────────────────────────
 
     CreateUserRequest:
       type: object
@@ -326,6 +854,10 @@ components:
         password:
           type: string
           minLength: 8
+        first_name:
+          type: string
+        last_name:
+          type: string
         app_url:
           type: string
           format: uri
@@ -349,7 +881,13 @@ components:
       properties:
         token:
           type: string
-          description: Signed HS256 JWT valid for `JWT_TTL_HOURS` hours
+          description: |
+            Signed HS256 JWT valid for `JWT_TTL_HOURS` hours. The payload carries:
+            - `sub` — user UUID
+            - `roles` — role names
+            - `permissions` — flattened permission names
+            - `subscriptions` — map of product slug → `{tier, status, seat_count?}`
+            - `teams` — map of team UUID → `{name, role}` for active memberships only
         user:
           $ref: '#/components/schemas/UserResponse'
         roles:
@@ -430,6 +968,12 @@ components:
           type: string
         is_active:
           type: boolean
+        first_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
         created_at:
           type: string
           format: date-time
@@ -448,6 +992,236 @@ components:
       properties:
         error:
           type: string
+
+    # ── Teams ─────────────────────────────────────────────────────────────────────
+
+    TeamUserRef:
+      description: Minimal user info embedded in team responses
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        first_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
+
+    TeamMemberResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: team_members row UUID
+        user:
+          $ref: '#/components/schemas/TeamUserRef'
+        status:
+          type: string
+          enum: [invited, active, inactive]
+        role:
+          type: string
+          enum: [owner, leader, member]
+          description: Derived from the team's owner_id and leader_id columns
+        invited_at:
+          type: string
+          format: date-time
+        joined_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    TeamResponse:
+      description: Full team representation including all non-inactive members
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        purpose:
+          type: string
+          nullable: true
+          description: Rich text / markdown field describing the team's purpose
+        avatar_url:
+          type: string
+          nullable: true
+        owner:
+          $ref: '#/components/schemas/TeamUserRef'
+        leader:
+          $ref: '#/components/schemas/TeamUserRef'
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/TeamMemberResponse'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TeamSummary:
+      description: Lightweight team representation used in list endpoints (no member list)
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        owner:
+          $ref: '#/components/schemas/TeamUserRef'
+        leader:
+          $ref: '#/components/schemas/TeamUserRef'
+        member_count:
+          type: integer
+          description: Number of active members
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TeamsPage:
+      type: object
+      properties:
+        teams:
+          type: array
+          items:
+            $ref: '#/components/schemas/TeamSummary'
+        total:
+          type: integer
+          description: Total number of teams matching the filter
+        page:
+          type: integer
+        page_size:
+          type: integer
+
+    CreateTeamRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        purpose:
+          type: string
+          description: Rich text / markdown describing the team's purpose
+        avatar_url:
+          type: string
+          format: uri
+
+    UpdateTeamRequest:
+      type: object
+      description: All fields are optional; only supplied fields are changed
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          nullable: true
+        purpose:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+          format: uri
+        leader_id:
+          type: string
+          format: uuid
+          description: Owner-only. The new leader must be an active member of the team.
+
+    InviteTeamMemberRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Email address of the registered user to invite
+        app_url:
+          type: string
+          format: uri
+          description: |
+            Frontend base URL used to build the invitation link in the email.
+            Must be in the server's ALLOWED_APP_URLS allowlist when configured.
+
+    AdminCreateTeamRequest:
+      type: object
+      required: [name, owner_id]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        purpose:
+          type: string
+        avatar_url:
+          type: string
+          format: uri
+        owner_id:
+          type: string
+          format: uuid
+          description: UUID of the user who will own the team
+
+    AdminUpdateTeamRequest:
+      type: object
+      description: All fields are optional; only supplied fields are changed
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          nullable: true
+        purpose:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+          format: uri
+        owner_id:
+          type: string
+          format: uuid
+          description: Transfer ownership to another active member
+        leader_id:
+          type: string
+          format: uuid
+          description: Assign a new leader
+
+    AdminAddTeamMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: UUID of the user to add directly as an active member
 
   responses:
     BadRequest:
@@ -478,7 +1252,7 @@ components:
             error: user not found
 
     Conflict:
-      description: Email or username already taken
+      description: Resource already exists or unique constraint violated
       content:
         application/json:
           schema:

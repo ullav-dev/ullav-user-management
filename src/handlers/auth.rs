@@ -8,7 +8,7 @@ use crate::{
     utils::{
         app_url::resolve_app_url,
         email::send_password_reset_email,
-        jwt::{create_jwt, decode_jwt, Claims, SubscriptionClaim},
+        jwt::{create_jwt, decode_jwt, Claims, SubscriptionClaim, TeamClaim},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
     AppState,
@@ -36,11 +36,10 @@ pub async fn login(
         return Err(AppError::InvalidCredentials);
     }
 
-    let (roles, permissions) =
+    let (roles, mut permissions) =
         db::get_user_roles_and_permissions(&state.pool, user.id).await?;
 
     // Build subscription claims from the DB — keyed by product slug.
-    // Users with no subscription rows get an empty map (treated as Individual by clients).
     let raw_subs = db::get_all_user_subscriptions(&state.pool, user.id).await?;
     let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
         .into_iter()
@@ -54,6 +53,24 @@ pub async fn login(
         })
         .collect();
 
+    // Grant teams:create to users with an active/trialing Family, Professional, or Enterprise
+    // Clann subscription — without requiring the admin role to manually assign the permission.
+    let clann_eligible = subscriptions.get("clann").map_or(false, |s| {
+        matches!(s.status.as_str(), "active" | "trialing")
+            && matches!(s.tier.as_str(), "family" | "professional" | "enterprise")
+    });
+    if clann_eligible && !permissions.contains(&"teams:create".to_string()) {
+        permissions.push("teams:create".to_string());
+        permissions.sort();
+    }
+
+    // Build team claims — only active memberships, keyed by team UUID string.
+    let raw_teams = db::get_user_active_teams(&state.pool, user.id).await?;
+    let teams: HashMap<String, TeamClaim> = raw_teams
+        .into_iter()
+        .map(|(id, name, role)| (id, TeamClaim { name, role }))
+        .collect();
+
     let token = create_jwt(
         user.id,
         &state.jwt_secret,
@@ -61,6 +78,7 @@ pub async fn login(
         roles.clone(),
         permissions.clone(),
         subscriptions,
+        teams,
     )?;
     let response = LoginResponse {
         token,

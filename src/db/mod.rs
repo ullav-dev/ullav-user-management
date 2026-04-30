@@ -1,7 +1,8 @@
 use crate::errors::AppError;
 use crate::models::{
     AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
-    Subscription, SubscriptionsPage, User, UserWithRoles, UsersPage,
+    Subscription, SubscriptionsPage, TeamMemberResponse, TeamMemberRow, TeamResponse, TeamSummary,
+    TeamUserRef, TeamsPage, User, UserWithRoles, UsersPage,
 };
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
@@ -1060,6 +1061,438 @@ pub async fn delete_plan(pool: &Pool, id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
+// ── Teams ─────────────────────────────────────────────────────────────────────
+
+/// Create a team and atomically add the owner as the first active member.
+/// Returns the new team's UUID.
+pub async fn create_team(
+    pool: &Pool,
+    name: &str,
+    description: Option<&str>,
+    purpose: Option<&str>,
+    avatar_url: Option<&str>,
+    owner_id: Uuid,
+) -> Result<Uuid, AppError> {
+    let mut client = pool.get().await?;
+    let tx = client.transaction().await?;
+
+    let row = tx
+        .query_one(
+            "INSERT INTO teams (name, description, purpose, avatar_url, owner_id, leader_id)
+             VALUES ($1, $2, $3, $4, $5, $5)
+             RETURNING id",
+            &[&name, &description, &purpose, &avatar_url, &owner_id],
+        )
+        .await?;
+
+    let team_id: Uuid = row.get("id");
+
+    tx.execute(
+        "INSERT INTO team_members (team_id, user_id, status, joined_at)
+         VALUES ($1, $2, 'active', NOW())",
+        &[&team_id, &owner_id],
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(team_id)
+}
+
+/// Fetch the owner_id and leader_id for a team. Returns NotFound if the team does not exist.
+pub async fn get_team_ownership(pool: &Pool, team_id: Uuid) -> Result<(Uuid, Uuid), AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT owner_id, leader_id FROM teams WHERE id = $1",
+            &[&team_id],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok((row.get("owner_id"), row.get("leader_id")))
+}
+
+/// Fetch a full team response including all non-inactive members.
+pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamResponse, AppError> {
+    let client = pool.get().await?;
+
+    let team_row = client
+        .query_opt(
+            "SELECT t.id, t.name, t.description, t.purpose, t.avatar_url,
+                    t.owner_id,
+                    o.username AS owner_username, o.email AS owner_email,
+                    o.first_name AS owner_first_name, o.last_name AS owner_last_name,
+                    t.leader_id,
+                    l.username AS leader_username, l.email AS leader_email,
+                    l.first_name AS leader_first_name, l.last_name AS leader_last_name,
+                    t.created_at, t.updated_at
+             FROM teams t
+             JOIN users o ON o.id = t.owner_id
+             JOIN users l ON l.id = t.leader_id
+             WHERE t.id = $1",
+            &[&team_id],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let member_rows = client
+        .query(
+            "SELECT tm.id, tm.user_id,
+                    u.username, u.email, u.first_name, u.last_name,
+                    tm.status::text,
+                    CASE
+                        WHEN tm.user_id = t.owner_id  THEN 'owner'
+                        WHEN tm.user_id = t.leader_id THEN 'leader'
+                        ELSE 'member'
+                    END AS role,
+                    tm.invited_at, tm.joined_at
+             FROM team_members tm
+             JOIN users u ON u.id = tm.user_id
+             JOIN teams t ON t.id = tm.team_id
+             WHERE tm.team_id = $1 AND tm.status != 'inactive'
+             ORDER BY tm.joined_at NULLS LAST, tm.invited_at",
+            &[&team_id],
+        )
+        .await?;
+
+    Ok(row_to_team_response(&team_row, &member_rows))
+}
+
+/// List teams where the user is an active member, returning lightweight summaries.
+pub async fn list_user_teams(pool: &Pool, user_id: Uuid) -> Result<Vec<TeamSummary>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT t.id, t.name, t.description, t.avatar_url,
+                    t.owner_id,
+                    o.username AS owner_username, o.email AS owner_email,
+                    o.first_name AS owner_first_name, o.last_name AS owner_last_name,
+                    t.leader_id,
+                    l.username AS leader_username, l.email AS leader_email,
+                    l.first_name AS leader_first_name, l.last_name AS leader_last_name,
+                    COUNT(m.id) FILTER (WHERE m.status = 'active') AS member_count,
+                    t.created_at, t.updated_at
+             FROM teams t
+             JOIN users o ON o.id = t.owner_id
+             JOIN users l ON l.id = t.leader_id
+             JOIN team_members me ON me.team_id = t.id AND me.user_id = $1 AND me.status = 'active'
+             LEFT JOIN team_members m ON m.team_id = t.id
+             GROUP BY t.id, o.id, l.id
+             ORDER BY t.name",
+            &[&user_id],
+        )
+        .await?;
+    Ok(rows.iter().map(row_to_team_summary).collect())
+}
+
+/// Update a team's editable fields. Null parameters leave columns unchanged.
+pub async fn update_team(
+    pool: &Pool,
+    team_id: Uuid,
+    name: Option<&str>,
+    description: Option<&str>,
+    purpose: Option<&str>,
+    avatar_url: Option<&str>,
+    leader_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let updated = client
+        .execute(
+            "UPDATE teams SET
+               name        = COALESCE($1, name),
+               description = COALESCE($2, description),
+               purpose     = COALESCE($3, purpose),
+               avatar_url  = COALESCE($4, avatar_url),
+               leader_id   = COALESCE($5, leader_id),
+               updated_at  = NOW()
+             WHERE id = $6",
+            &[&name, &description, &purpose, &avatar_url, &leader_id, &team_id],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Admin variant: can also change owner_id.
+pub async fn admin_update_team(
+    pool: &Pool,
+    team_id: Uuid,
+    name: Option<&str>,
+    description: Option<&str>,
+    purpose: Option<&str>,
+    avatar_url: Option<&str>,
+    owner_id: Option<Uuid>,
+    leader_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let updated = client
+        .execute(
+            "UPDATE teams SET
+               name        = COALESCE($1, name),
+               description = COALESCE($2, description),
+               purpose     = COALESCE($3, purpose),
+               avatar_url  = COALESCE($4, avatar_url),
+               owner_id    = COALESCE($5, owner_id),
+               leader_id   = COALESCE($6, leader_id),
+               updated_at  = NOW()
+             WHERE id = $7",
+            &[&name, &description, &purpose, &avatar_url, &owner_id, &leader_id, &team_id],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Delete a team by ID. Cascades to team_members.
+pub async fn delete_team(pool: &Pool, team_id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute("DELETE FROM teams WHERE id = $1", &[&team_id])
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Check whether a user is already a member (any status) of a team.
+pub async fn get_team_membership(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<TeamMemberRow>, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT id, team_id, user_id, status::text,
+                    invite_token_expires_at, invited_at, joined_at
+             FROM team_members WHERE team_id = $1 AND user_id = $2",
+            &[&team_id, &user_id],
+        )
+        .await?;
+    Ok(row.as_ref().map(row_to_team_member_row))
+}
+
+/// Create a pending invitation row. Returns Conflict if the user is already a member.
+pub async fn invite_team_member(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    invited_by: Uuid,
+    token: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO team_members
+                (team_id, user_id, status, invited_by, invite_token, invite_token_expires_at, invited_at)
+             VALUES ($1, $2, 'invited', $3, $4, $5, NOW())",
+            &[&team_id, &user_id, &invited_by, &token, &expires_at],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db) = e.as_db_error() {
+                if db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+    Ok(())
+}
+
+/// Directly add a user as an active member (admin bypass — skips invite flow).
+pub async fn add_team_member_active(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    added_by: Uuid,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO team_members
+                (team_id, user_id, status, invited_by, joined_at)
+             VALUES ($1, $2, 'active', $3, NOW())
+             ON CONFLICT (team_id, user_id) DO UPDATE
+             SET status = 'active', joined_at = COALESCE(team_members.joined_at, NOW())",
+            &[&team_id, &user_id, &added_by],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Retrieve a team_members row by invitation token.
+pub async fn get_team_member_by_token(
+    pool: &Pool,
+    token: &str,
+) -> Result<TeamMemberRow, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT id, team_id, user_id, status::text,
+                    invite_token_expires_at, invited_at, joined_at
+             FROM team_members WHERE invite_token = $1",
+            &[&token],
+        )
+        .await?
+        .ok_or(AppError::InvalidToken)?;
+    Ok(row_to_team_member_row(&row))
+}
+
+/// Accept an invitation: set status to active, record joined_at, clear the token.
+pub async fn accept_team_invitation(pool: &Pool, member_id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE team_members
+             SET status = 'active', joined_at = NOW(),
+                 invite_token = NULL, invite_token_expires_at = NULL
+             WHERE id = $1",
+            &[&member_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Decline an invitation: delete the membership row entirely.
+pub async fn decline_team_invitation(pool: &Pool, member_id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute("DELETE FROM team_members WHERE id = $1", &[&member_id])
+        .await?;
+    Ok(())
+}
+
+/// Remove an active/invited member from a team.
+pub async fn remove_team_member(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute(
+            "DELETE FROM team_members WHERE team_id = $1 AND user_id = $2",
+            &[&team_id, &user_id],
+        )
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Replace an invited member's token + expiry so a fresh invite email can be sent.
+/// Returns NotFound if the member is not in "invited" status.
+pub async fn refresh_invite_token(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    new_token: &str,
+    new_expires_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let updated = client
+        .execute(
+            "UPDATE team_members
+             SET invite_token = $3, invite_token_expires_at = $4, invited_at = NOW()
+             WHERE team_id = $1 AND user_id = $2 AND status = 'invited'",
+            &[&team_id, &user_id, &new_token, &new_expires_at],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Fetch all active team memberships for a user to embed in the JWT.
+/// Returns (team_id_string, name, role) tuples.
+pub async fn get_user_active_teams(
+    pool: &Pool,
+    user_id: Uuid,
+) -> Result<Vec<(String, String, String)>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT t.id::text AS team_id, t.name,
+                    CASE
+                        WHEN tm.user_id = t.owner_id  THEN 'owner'
+                        WHEN tm.user_id = t.leader_id THEN 'leader'
+                        ELSE 'member'
+                    END AS role
+             FROM team_members tm
+             JOIN teams t ON t.id = tm.team_id
+             WHERE tm.user_id = $1 AND tm.status = 'active'
+             ORDER BY t.name",
+            &[&user_id],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get("team_id"), r.get("name"), r.get("role")))
+        .collect())
+}
+
+/// List teams with optional search, paginated — for the admin panel.
+pub async fn list_teams_paginated(
+    pool: &Pool,
+    page: i64,
+    page_size: i64,
+    search: &str,
+) -> Result<TeamsPage, AppError> {
+    let client = pool.get().await?;
+    let offset = (page - 1) * page_size;
+    let pattern = if search.is_empty() {
+        "%".to_string()
+    } else {
+        format!("%{}%", search.to_lowercase())
+    };
+
+    let total_row = client
+        .query_one(
+            "SELECT COUNT(*) FROM teams t
+             JOIN users o ON o.id = t.owner_id
+             WHERE LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1",
+            &[&pattern],
+        )
+        .await?;
+    let total: i64 = total_row.get(0);
+
+    let rows = client
+        .query(
+            "SELECT t.id, t.name, t.description, t.avatar_url,
+                    t.owner_id,
+                    o.username AS owner_username, o.email AS owner_email,
+                    o.first_name AS owner_first_name, o.last_name AS owner_last_name,
+                    t.leader_id,
+                    l.username AS leader_username, l.email AS leader_email,
+                    l.first_name AS leader_first_name, l.last_name AS leader_last_name,
+                    COUNT(m.id) FILTER (WHERE m.status = 'active') AS member_count,
+                    t.created_at, t.updated_at
+             FROM teams t
+             JOIN users o ON o.id = t.owner_id
+             JOIN users l ON l.id = t.leader_id
+             LEFT JOIN team_members m ON m.team_id = t.id
+             WHERE LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1
+             GROUP BY t.id, o.id, l.id
+             ORDER BY t.name
+             LIMIT $2 OFFSET $3",
+            &[&pattern, &page_size, &offset],
+        )
+        .await?;
+
+    let teams = rows.iter().map(row_to_team_summary).collect();
+    Ok(TeamsPage { teams, total, page, page_size })
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
 fn row_to_admin_subscription(row: &tokio_postgres::Row) -> AdminSubscription {
     AdminSubscription {
         id: row.get("id"),
@@ -1076,5 +1509,96 @@ fn row_to_admin_subscription(row: &tokio_postgres::Row) -> AdminSubscription {
         current_period_end: row.get("current_period_end"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_team_user_ref(
+    row: &tokio_postgres::Row,
+    id_col: &str,
+    username_col: &str,
+    email_col: &str,
+    first_name_col: &str,
+    last_name_col: &str,
+) -> TeamUserRef {
+    TeamUserRef {
+        id: row.get(id_col),
+        username: row.get(username_col),
+        email: row.get(email_col),
+        first_name: row.get(first_name_col),
+        last_name: row.get(last_name_col),
+    }
+}
+
+fn row_to_team_summary(row: &tokio_postgres::Row) -> TeamSummary {
+    TeamSummary {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        avatar_url: row.get("avatar_url"),
+        owner: row_to_team_user_ref(
+            row, "owner_id", "owner_username", "owner_email",
+            "owner_first_name", "owner_last_name",
+        ),
+        leader: row_to_team_user_ref(
+            row, "leader_id", "leader_username", "leader_email",
+            "leader_first_name", "leader_last_name",
+        ),
+        member_count: row.get("member_count"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_team_response(
+    team_row: &tokio_postgres::Row,
+    member_rows: &[tokio_postgres::Row],
+) -> TeamResponse {
+    let members = member_rows
+        .iter()
+        .map(|r| TeamMemberResponse {
+            id: r.get("id"),
+            user: TeamUserRef {
+                id: r.get("user_id"),
+                username: r.get("username"),
+                email: r.get("email"),
+                first_name: r.get("first_name"),
+                last_name: r.get("last_name"),
+            },
+            status: r.get("status"),
+            role: r.get("role"),
+            invited_at: r.get("invited_at"),
+            joined_at: r.get("joined_at"),
+        })
+        .collect();
+
+    TeamResponse {
+        id: team_row.get("id"),
+        name: team_row.get("name"),
+        description: team_row.get("description"),
+        purpose: team_row.get("purpose"),
+        avatar_url: team_row.get("avatar_url"),
+        owner: row_to_team_user_ref(
+            team_row, "owner_id", "owner_username", "owner_email",
+            "owner_first_name", "owner_last_name",
+        ),
+        leader: row_to_team_user_ref(
+            team_row, "leader_id", "leader_username", "leader_email",
+            "leader_first_name", "leader_last_name",
+        ),
+        members,
+        created_at: team_row.get("created_at"),
+        updated_at: team_row.get("updated_at"),
+    }
+}
+
+fn row_to_team_member_row(row: &tokio_postgres::Row) -> TeamMemberRow {
+    TeamMemberRow {
+        id: row.get("id"),
+        team_id: row.get("team_id"),
+        user_id: row.get("user_id"),
+        status: row.get("status"),
+        invite_token_expires_at: row.get("invite_token_expires_at"),
+        invited_at: row.get("invited_at"),
+        joined_at: row.get("joined_at"),
     }
 }

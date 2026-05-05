@@ -93,15 +93,23 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| "true".into())
         .parse()
         .unwrap_or(true);
+    let require_https: bool = env::var("REQUIRE_HTTPS")
+        .unwrap_or_else(|_| "true".into())
+        .parse()
+        .unwrap_or(true);
     let https_whitelist: Vec<IpAddr> = env::var("WHITELIST")
         .unwrap_or_default()
         .split(',')
         .filter_map(|s| s.trim().parse::<IpAddr>().ok())
         .collect();
-    log::info!(
-        "HTTPS enforcement enabled — {} additional whitelisted IP(s)",
-        https_whitelist.len()
-    );
+    if require_https {
+        log::info!(
+            "HTTPS enforcement enabled — {} additional whitelisted IP(s)",
+            https_whitelist.len()
+        );
+    } else {
+        log::info!("HTTPS enforcement disabled (REQUIRE_HTTPS=false)");
+    }
 
     // Geo-blocking — optional; requires GEOBLOCK (country codes) + GEOIP_DB (path to .mmdb).
     let geoblock_countries: Arc<HashSet<String>> = Arc::new(
@@ -285,7 +293,7 @@ async fn main() -> std::io::Result<()> {
         let mut app = App::new()
             .app_data(state.clone())
             .wrap(Logger::default())
-            .wrap(middleware::https::HttpsOnly::new(&https_whitelist))
+            .wrap(middleware::https::HttpsOnly::new(&https_whitelist, require_https))
             .wrap(middleware::geo::GeoBlock::new(
                 geoip_reader.clone(),
                 geoblock_countries.clone(),

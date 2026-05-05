@@ -27,12 +27,15 @@ fn parse_ip(s: &str) -> Option<IpAddr> {
 /// by the application itself.
 pub struct HttpsOnly {
     allowed_ips: Rc<Vec<IpAddr>>,
+    enabled: bool,
 }
 
 impl HttpsOnly {
     /// `whitelist` is the set of additional IPs that may use plain HTTP.
     /// Localhost addresses are always included automatically.
-    pub fn new(whitelist: &[IpAddr]) -> Self {
+    /// Set `enabled = false` to make the middleware a no-op (e.g. when TLS
+    /// is terminated at a Kubernetes ingress and not re-enforced internally).
+    pub fn new(whitelist: &[IpAddr], enabled: bool) -> Self {
         let mut allowed: Vec<IpAddr> = vec![
             "127.0.0.1".parse().unwrap(),
             "::1".parse().unwrap(),
@@ -40,6 +43,7 @@ impl HttpsOnly {
         allowed.extend_from_slice(whitelist);
         Self {
             allowed_ips: Rc::new(allowed),
+            enabled,
         }
     }
 }
@@ -60,6 +64,7 @@ where
         ready(Ok(HttpsOnlyInner {
             service: Rc::new(service),
             allowed_ips: self.allowed_ips.clone(),
+            enabled: self.enabled,
         }))
     }
 }
@@ -67,6 +72,7 @@ where
 pub struct HttpsOnlyInner<S> {
     service: Rc<S>,
     allowed_ips: Rc<Vec<IpAddr>>,
+    enabled: bool,
 }
 
 impl<S, B> Service<ServiceRequest> for HttpsOnlyInner<S>
@@ -82,6 +88,13 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
+        if !self.enabled {
+            let service = Rc::clone(&self.service);
+            return Box::pin(async move {
+                service.call(req).await.map(ServiceResponse::map_into_left_body)
+            });
+        }
+
         // Resolve scheme and real client IP before consuming `req`.
         // connection_info checks X-Forwarded-Proto / X-Real-IP / X-Forwarded-For
         // headers set by a reverse proxy before falling back to the socket address.

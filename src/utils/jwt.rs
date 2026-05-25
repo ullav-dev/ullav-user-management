@@ -27,8 +27,13 @@ pub struct SubscriptionClaim {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamClaim {
     pub name: String,
-    /// Role of the token holder in this team: `"owner"`, `"leader"`, or `"member"`.
+    /// Positional role: `"owner"`, `"leader"`, or `"member"`.
     pub role: String,
+    /// Custom team roles assigned to this member (e.g. `"Approver"`, `"Editor"`).
+    /// Downstream services use these names to gate domain-specific functionality.
+    /// Defaults to an empty vec so tokens issued before this field was added still decode.
+    #[serde(default)]
+    pub team_roles: Vec<String>,
 }
 
 /// JWT claims embedded in the token.
@@ -40,6 +45,11 @@ pub struct Claims {
     pub iat: i64,
     /// Expiry epoch seconds.
     pub exp: i64,
+    /// The user's login username — included so downstream services can display
+    /// human-readable attribution without an extra lookup.
+    /// Defaults to empty string so tokens issued before this field was added still decode.
+    #[serde(default)]
+    pub username: String,
     /// Roles assigned to the user.
     pub roles: Vec<String>,
     /// Permissions granted to the user (union of all role permissions).
@@ -57,6 +67,7 @@ pub struct Claims {
 /// Create a signed JWT for the given user id.
 pub fn create_jwt(
     user_id: Uuid,
+    username: String,
     secret: &str,
     ttl_hours: i64,
     roles: Vec<String>,
@@ -69,6 +80,7 @@ pub fn create_jwt(
         sub: user_id.to_string(),
         iat: now.timestamp(),
         exp: (now + Duration::hours(ttl_hours)).timestamp(),
+        username,
         roles,
         permissions,
         subscriptions,

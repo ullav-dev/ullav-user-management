@@ -16,6 +16,8 @@ pub struct ActiveTeamInfo {
     pub role: String,
     /// Names of custom team roles assigned to this member.
     pub team_roles: Vec<String>,
+    /// Product-specific access roles: product_slug → role (e.g. "obair" → "admin").
+    pub product_roles: HashMap<String, String>,
 }
 
 /// Insert a new user into the database, returning the full row.
@@ -1446,6 +1448,9 @@ pub async fn refresh_invite_token(
 }
 
 /// Fetch all active team memberships for a user to embed in the JWT.
+///
+/// Uses correlated subqueries for team_roles and product_roles to avoid
+/// a cartesian product when a member has both custom roles and product roles.
 pub async fn get_user_active_teams(
     pool: &Pool,
     user_id: Uuid,
@@ -1459,28 +1464,51 @@ pub async fn get_user_active_teams(
                         WHEN tm.user_id = t.leader_id THEN 'leader'
                         ELSE 'member'
                     END AS role,
-                    COALESCE(
-                        ARRAY_AGG(tr.name ORDER BY tr.name)
-                            FILTER (WHERE tr.name IS NOT NULL),
-                        '{}'::text[]
+                    (
+                        SELECT COALESCE(ARRAY_AGG(tr2.name ORDER BY tr2.name), '{}'::text[])
+                        FROM team_member_roles tmr2
+                        JOIN team_roles tr2 ON tr2.id = tmr2.role_id
+                        WHERE tmr2.member_id = tm.id
                     ) AS team_role_names
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
-             LEFT JOIN team_member_roles tmr ON tmr.member_id = tm.id
-             LEFT JOIN team_roles tr ON tr.id = tmr.role_id
              WHERE tm.user_id = $1 AND tm.status = 'active'
-             GROUP BY t.id, t.name, t.owner_id, t.leader_id, tm.user_id
              ORDER BY t.name",
             &[&user_id],
         )
         .await?;
+
+    // Fetch product roles in a single query and group by team in application code.
+    // Kept separate from the teams query to avoid a cartesian product with team_roles.
+    let pr_rows = client
+        .query(
+            "SELECT team_id::text, product_slug, role
+             FROM team_member_product_roles
+             WHERE user_id = $1",
+            &[&user_id],
+        )
+        .await?;
+
+    let mut product_roles_by_team: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for row in &pr_rows {
+        let tid: String = row.get("team_id");
+        let slug: String = row.get("product_slug");
+        let role: String = row.get("role");
+        product_roles_by_team.entry(tid).or_default().insert(slug, role);
+    }
+
     Ok(rows
         .iter()
-        .map(|r| ActiveTeamInfo {
-            team_id: r.get("team_id"),
-            name: r.get("name"),
-            role: r.get("role"),
-            team_roles: r.get("team_role_names"),
+        .map(|r| {
+            let team_id: String = r.get("team_id");
+            let product_roles = product_roles_by_team.remove(&team_id).unwrap_or_default();
+            ActiveTeamInfo {
+                team_id,
+                name: r.get("name"),
+                role: r.get("role"),
+                team_roles: r.get("team_role_names"),
+                product_roles,
+            }
         })
         .collect())
 }

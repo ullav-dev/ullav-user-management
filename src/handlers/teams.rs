@@ -1,14 +1,14 @@
 use crate::{
     db,
     errors::AppError,
+    middleware::auth::claims_from_req,
     models::{
-        CreateTeamRequest, CreateTeamRoleRequest, InviteTeamMemberRequest, ResendInviteRequest,
-        UpdateTeamRequest, UpdateTeamRoleRequest,
+        AssignProductRoleRequest, CreateTeamRequest, CreateTeamRoleRequest,
+        InviteTeamMemberRequest, ResendInviteRequest, UpdateTeamRequest, UpdateTeamRoleRequest,
     },
     utils::{
         app_url::resolve_app_url,
         email::send_team_invitation_email,
-        jwt::Claims,
         password::generate_secure_token,
     },
     AppState,
@@ -508,13 +508,74 @@ pub async fn unassign_member_role(
     Ok(HttpResponse::NoContent().finish())
 }
 
+// ── Team product roles ────────────────────────────────────────────────────────
+
+/// `POST /teams/{id}/members/{user_id}/product-roles/{slug}` — assign or update a product role.
+/// Owner only; the user must already be an active member and the team must have the product enabled.
+#[post("/teams/{id}/members/{user_id}/product-roles/{slug}")]
+pub async fn assign_member_product_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid, String)>,
+    body: web::Json<AssignProductRoleRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, target_user_id, product_slug) = path.into_inner();
+
+    let (owner_id, _) = db::get_team_ownership(&state.pool, team_id).await?;
+    if caller_id != owner_id {
+        return Err(AppError::Forbidden);
+    }
+
+    validate_product_role(&product_slug, &body.role)?;
+    db::assign_member_product_role(
+        &state.pool, team_id, target_user_id, &product_slug, &body.role, caller_id,
+    ).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `DELETE /teams/{id}/members/{user_id}/product-roles/{slug}` — revoke a product role.
+/// Owner only.
+#[delete("/teams/{id}/members/{user_id}/product-roles/{slug}")]
+pub async fn revoke_member_product_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid, String)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, target_user_id, product_slug) = path.into_inner();
+
+    let (owner_id, _) = db::get_team_ownership(&state.pool, team_id).await?;
+    if caller_id != owner_id {
+        return Err(AppError::Forbidden);
+    }
+
+    db::revoke_member_product_role(&state.pool, team_id, target_user_id, &product_slug).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn claims_from_req(req: &HttpRequest) -> Result<Claims, AppError> {
-    req.extensions()
-        .get::<Claims>()
-        .cloned()
-        .ok_or(AppError::InvalidToken)
+/// Validate that `role` is a known value for the given product.
+/// Obair: "admin" | "lead" | "member". Other products: non-empty string.
+fn validate_product_role(product_slug: &str, role: &str) -> Result<(), AppError> {
+    match product_slug {
+        "obair" => {
+            if !matches!(role, "admin" | "lead" | "member") {
+                return Err(AppError::Validation(format!(
+                    "invalid obair role '{}': must be admin, lead, or member", role
+                )));
+            }
+        }
+        _ => {
+            if role.trim().is_empty() {
+                return Err(AppError::Validation("role must not be empty".into()));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn require_active_member(

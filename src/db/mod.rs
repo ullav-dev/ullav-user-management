@@ -1,8 +1,9 @@
 use crate::errors::AppError;
 use crate::models::{
     AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
-    Subscription, SubscriptionsPage, TeamMemberResponse, TeamMemberRow, TeamResponse, TeamRoleResponse,
-    TeamSummary, TeamUserRef, TeamsPage, User, UserWithRoles, UsersPage,
+    Subscription, SubscriptionsPage, TeamMemberResponse, TeamMemberRow, TeamProductAccessResponse,
+    TeamResponse, TeamRoleResponse, TeamSummary, TeamUserRef, TeamsPage, User, UserWithRoles,
+    UsersPage,
 };
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
@@ -1709,6 +1710,144 @@ pub async fn unassign_member_role(
                AND tm.team_id = $2
                AND tm.user_id = $3",
             &[&role_id, &team_id, &user_id],
+        )
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+// ── Team product access ───────────────────────────────────────────────────────
+
+/// Enable a product for a team. Idempotent — does nothing if already enabled.
+pub async fn enable_team_product(
+    pool: &Pool,
+    team_id: Uuid,
+    product_slug: &str,
+    granted_by: Uuid,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO team_product_access (team_id, product_slug, granted_by)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (team_id, product_slug) DO NOTHING",
+            &[&team_id, &product_slug, &granted_by],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Disable a product for a team.
+/// Returns NotFound if the team did not have the product enabled.
+/// Cascades: all team_member_product_roles for this (team, product) are deleted automatically.
+pub async fn disable_team_product(
+    pool: &Pool,
+    team_id: Uuid,
+    product_slug: &str,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute(
+            "DELETE FROM team_product_access WHERE team_id = $1 AND product_slug = $2",
+            &[&team_id, &product_slug],
+        )
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// List all products enabled for a team.
+pub async fn list_team_products(
+    pool: &Pool,
+    team_id: Uuid,
+) -> Result<Vec<TeamProductAccessResponse>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT p.slug AS product_slug, p.name AS product_name,
+                    tpa.granted_at, u.username AS granted_by_username
+             FROM team_product_access tpa
+             JOIN products p ON p.slug = tpa.product_slug
+             LEFT JOIN users u ON u.id = tpa.granted_by
+             WHERE tpa.team_id = $1
+             ORDER BY p.name",
+            &[&team_id],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| TeamProductAccessResponse {
+            product_slug: r.get("product_slug"),
+            product_name: r.get("product_name"),
+            granted_at: r.get("granted_at"),
+            granted_by_username: r.get("granted_by_username"),
+        })
+        .collect())
+}
+
+/// Assign (or update) a product role for a team member.
+///
+/// Upserts so calling again with a different role updates the existing assignment.
+/// Converts FK violations into descriptive Validation errors rather than 500s.
+pub async fn assign_member_product_role(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    product_slug: &str,
+    role: &str,
+    assigned_by: Uuid,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO team_member_product_roles
+                 (team_id, user_id, product_slug, role, assigned_by)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (team_id, user_id, product_slug)
+             DO UPDATE SET role = EXCLUDED.role, assigned_by = EXCLUDED.assigned_by,
+                           assigned_at = NOW()",
+            &[&team_id, &user_id, &product_slug, &role, &assigned_by],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db_err) = e.as_db_error() {
+                if db_err.code() == &tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION {
+                    let msg = db_err.message();
+                    if msg.contains("team_product_access") {
+                        return AppError::Validation(
+                            "team does not have this product enabled".into(),
+                        );
+                    }
+                    if msg.contains("team_members") {
+                        return AppError::Validation(
+                            "user is not an active member of this team".into(),
+                        );
+                    }
+                }
+            }
+            AppError::Database(e)
+        })?;
+    Ok(())
+}
+
+/// Revoke a product role from a team member.
+/// Returns NotFound if no assignment exists.
+pub async fn revoke_member_product_role(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    product_slug: &str,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute(
+            "DELETE FROM team_member_product_roles
+             WHERE team_id = $1 AND user_id = $2 AND product_slug = $3",
+            &[&team_id, &user_id, &product_slug],
         )
         .await?;
     if deleted == 0 {

@@ -2,7 +2,8 @@ use crate::{
     db,
     errors::AppError,
     models::{
-        CreateTeamRequest, InviteTeamMemberRequest, ResendInviteRequest, UpdateTeamRequest,
+        CreateTeamRequest, CreateTeamRoleRequest, InviteTeamMemberRequest, ResendInviteRequest,
+        UpdateTeamRequest, UpdateTeamRoleRequest,
     },
     utils::{
         app_url::resolve_app_url,
@@ -359,6 +360,151 @@ pub async fn resend_invitation(
         );
     }
 
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ── Team roles ────────────────────────────────────────────────────────────────
+
+/// `GET /teams/{id}/roles` — list all roles defined for the team; any active member.
+#[get("/teams/{id}/roles")]
+pub async fn list_team_roles(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let team_id = path.into_inner();
+    require_active_member(&state, team_id, user_id).await?;
+    let roles = db::list_team_roles(&state.pool, team_id).await?;
+    Ok(HttpResponse::Ok().json(roles))
+}
+
+/// `POST /teams/{id}/roles` — create a role for the team; owner only.
+#[post("/teams/{id}/roles")]
+pub async fn create_team_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<CreateTeamRoleRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let team_id = path.into_inner();
+
+    let (owner_id, _) = db::get_team_ownership(&state.pool, team_id).await?;
+    if user_id != owner_id {
+        return Err(AppError::Forbidden);
+    }
+
+    if body.name.trim().is_empty() {
+        return Err(AppError::Validation("name must not be empty".into()));
+    }
+
+    let role = db::create_team_role(
+        &state.pool,
+        team_id,
+        body.name.trim(),
+        body.description.as_deref(),
+    )
+    .await?;
+    Ok(HttpResponse::Created().json(role))
+}
+
+/// `PATCH /teams/{id}/roles/{role_id}` — update a role's name or description; owner only.
+#[patch("/teams/{id}/roles/{role_id}")]
+pub async fn update_team_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+    body: web::Json<UpdateTeamRoleRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, role_id) = path.into_inner();
+
+    let (owner_id, _) = db::get_team_ownership(&state.pool, team_id).await?;
+    if user_id != owner_id {
+        return Err(AppError::Forbidden);
+    }
+
+    if let Some(ref name) = body.name {
+        if name.trim().is_empty() {
+            return Err(AppError::Validation("name must not be empty".into()));
+        }
+    }
+
+    let role = db::update_team_role(
+        &state.pool,
+        team_id,
+        role_id,
+        body.name.as_deref().map(str::trim),
+        body.description.as_deref(),
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(role))
+}
+
+/// `DELETE /teams/{id}/roles/{role_id}` — delete a role; owner only.
+/// Cascades to remove all member assignments for that role.
+#[delete("/teams/{id}/roles/{role_id}")]
+pub async fn delete_team_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, role_id) = path.into_inner();
+
+    let (owner_id, _) = db::get_team_ownership(&state.pool, team_id).await?;
+    if user_id != owner_id {
+        return Err(AppError::Forbidden);
+    }
+
+    db::delete_team_role(&state.pool, team_id, role_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /teams/{id}/members/{user_id}/roles/{role_id}` — assign a role to a member;
+/// owner or leader only. The target must be an active member of the team.
+#[post("/teams/{id}/members/{user_id}/roles/{role_id}")]
+pub async fn assign_member_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, target_user_id, role_id) = path.into_inner();
+
+    let (owner_id, leader_id) = db::get_team_ownership(&state.pool, team_id).await?;
+    if caller_id != owner_id && caller_id != leader_id {
+        return Err(AppError::Forbidden);
+    }
+
+    db::assign_member_role(&state.pool, team_id, target_user_id, role_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `DELETE /teams/{id}/members/{user_id}/roles/{role_id}` — remove a role from a member;
+/// owner or leader only.
+#[delete("/teams/{id}/members/{user_id}/roles/{role_id}")]
+pub async fn unassign_member_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, target_user_id, role_id) = path.into_inner();
+
+    let (owner_id, leader_id) = db::get_team_ownership(&state.pool, team_id).await?;
+    if caller_id != owner_id && caller_id != leader_id {
+        return Err(AppError::Forbidden);
+    }
+
+    db::unassign_member_role(&state.pool, team_id, target_user_id, role_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

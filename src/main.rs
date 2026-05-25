@@ -337,6 +337,15 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::teams::invite_member)
                     .service(handlers::teams::resend_invitation)
                     .service(handlers::teams::remove_member)
+                    // Team roles — ownership/membership checks inside handlers.
+                    // Role routes registered before member-role routes so the
+                    // static /roles segment wins over /{role_id} where ambiguous.
+                    .service(handlers::teams::list_team_roles)
+                    .service(handlers::teams::create_team_role)
+                    .service(handlers::teams::update_team_role)
+                    .service(handlers::teams::delete_team_role)
+                    .service(handlers::teams::assign_member_role)
+                    .service(handlers::teams::unassign_member_role)
                     // Health — requires `health:read`; use /health prefix to isolate
                     .service(
                         web::scope("/health")

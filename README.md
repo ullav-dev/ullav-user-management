@@ -291,7 +291,7 @@ SELECT '<user-uuid>', id FROM roles WHERE name = 'admin';
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) ≥ 1.80
-- [Docker](https://www.docker.com/) & Docker Compose (for the full stack)
+- Docker & Docker Compose — on macOS, use **[Colima](https://github.com/abiosoft/colima)** (not Docker Desktop): `brew install colima docker docker-compose && colima start`
 
 ### Quick start with Docker Compose
 

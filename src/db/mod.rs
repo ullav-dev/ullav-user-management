@@ -1,12 +1,22 @@
 use crate::errors::AppError;
 use crate::models::{
     AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
-    Subscription, SubscriptionsPage, TeamMemberResponse, TeamMemberRow, TeamResponse, TeamSummary,
-    TeamUserRef, TeamsPage, User, UserWithRoles, UsersPage,
+    Subscription, SubscriptionsPage, TeamMemberResponse, TeamMemberRow, TeamResponse, TeamRoleResponse,
+    TeamSummary, TeamUserRef, TeamsPage, User, UserWithRoles, UsersPage,
 };
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
+use std::collections::HashMap;
 use uuid::Uuid;
+
+/// Active team membership data used when building the JWT teams claim.
+pub struct ActiveTeamInfo {
+    pub team_id: String,
+    pub name: String,
+    pub role: String,
+    /// Names of custom team roles assigned to this member.
+    pub team_roles: Vec<String>,
+}
 
 /// Insert a new user into the database, returning the full row.
 pub async fn create_user(
@@ -1111,7 +1121,7 @@ pub async fn get_team_ownership(pool: &Pool, team_id: Uuid) -> Result<(Uuid, Uui
     Ok((row.get("owner_id"), row.get("leader_id")))
 }
 
-/// Fetch a full team response including all non-inactive members.
+/// Fetch a full team response including all non-inactive members and their team roles.
 pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamResponse, AppError> {
     let client = pool.get().await?;
 
@@ -1154,7 +1164,31 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
         )
         .await?;
 
-    Ok(row_to_team_response(&team_row, &member_rows))
+    // Fetch all role assignments for this team in one query, keyed by team_members.id.
+    let role_rows = client
+        .query(
+            "SELECT tmr.member_id, tr.id AS role_id, tr.name, tr.description,
+                    tr.created_at, tr.updated_at
+             FROM team_member_roles tmr
+             JOIN team_roles tr ON tr.id = tmr.role_id
+             WHERE tmr.team_id = $1",
+            &[&team_id],
+        )
+        .await?;
+
+    let mut roles_by_member: HashMap<Uuid, Vec<TeamRoleResponse>> = HashMap::new();
+    for row in &role_rows {
+        let member_id: Uuid = row.get("member_id");
+        roles_by_member.entry(member_id).or_default().push(TeamRoleResponse {
+            id: row.get("role_id"),
+            name: row.get("name"),
+            description: row.get("description"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        });
+    }
+
+    Ok(row_to_team_response(&team_row, &member_rows, &roles_by_member))
 }
 
 /// List teams where the user is an active member, returning lightweight summaries.
@@ -1412,11 +1446,10 @@ pub async fn refresh_invite_token(
 }
 
 /// Fetch all active team memberships for a user to embed in the JWT.
-/// Returns (team_id_string, name, role) tuples.
 pub async fn get_user_active_teams(
     pool: &Pool,
     user_id: Uuid,
-) -> Result<Vec<(String, String, String)>, AppError> {
+) -> Result<Vec<ActiveTeamInfo>, AppError> {
     let client = pool.get().await?;
     let rows = client
         .query(
@@ -1425,17 +1458,30 @@ pub async fn get_user_active_teams(
                         WHEN tm.user_id = t.owner_id  THEN 'owner'
                         WHEN tm.user_id = t.leader_id THEN 'leader'
                         ELSE 'member'
-                    END AS role
+                    END AS role,
+                    COALESCE(
+                        ARRAY_AGG(tr.name ORDER BY tr.name)
+                            FILTER (WHERE tr.name IS NOT NULL),
+                        '{}'::text[]
+                    ) AS team_role_names
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
+             LEFT JOIN team_member_roles tmr ON tmr.member_id = tm.id
+             LEFT JOIN team_roles tr ON tr.id = tmr.role_id
              WHERE tm.user_id = $1 AND tm.status = 'active'
+             GROUP BY t.id, t.name, t.owner_id, t.leader_id, tm.user_id
              ORDER BY t.name",
             &[&user_id],
         )
         .await?;
     Ok(rows
         .iter()
-        .map(|r| (r.get("team_id"), r.get("name"), r.get("role")))
+        .map(|r| ActiveTeamInfo {
+            team_id: r.get("team_id"),
+            name: r.get("name"),
+            role: r.get("role"),
+            team_roles: r.get("team_role_names"),
+        })
         .collect())
 }
 
@@ -1489,6 +1535,158 @@ pub async fn list_teams_paginated(
 
     let teams = rows.iter().map(row_to_team_summary).collect();
     Ok(TeamsPage { teams, total, page, page_size })
+}
+
+// ── Team roles ────────────────────────────────────────────────────────────────
+
+/// List all roles defined for a team, ordered by name.
+pub async fn list_team_roles(pool: &Pool, team_id: Uuid) -> Result<Vec<TeamRoleResponse>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT id, name, description, created_at, updated_at
+             FROM team_roles WHERE team_id = $1 ORDER BY name",
+            &[&team_id],
+        )
+        .await?;
+    Ok(rows.iter().map(row_to_team_role).collect())
+}
+
+/// Create a new role for a team. Returns Conflict if the name already exists in that team.
+pub async fn create_team_role(
+    pool: &Pool,
+    team_id: Uuid,
+    name: &str,
+    description: Option<&str>,
+) -> Result<TeamRoleResponse, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "INSERT INTO team_roles (team_id, name, description)
+             VALUES ($1, $2, $3)
+             RETURNING id, name, description, created_at, updated_at",
+            &[&team_id, &name, &description],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db) = e.as_db_error() {
+                if db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+    Ok(row_to_team_role(&row))
+}
+
+/// Update a team role's name and/or description. Returns NotFound if the role does not belong
+/// to the given team. Returns Conflict on duplicate name.
+pub async fn update_team_role(
+    pool: &Pool,
+    team_id: Uuid,
+    role_id: Uuid,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> Result<TeamRoleResponse, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "UPDATE team_roles SET
+               name        = COALESCE($3, name),
+               description = COALESCE($4, description),
+               updated_at  = NOW()
+             WHERE id = $1 AND team_id = $2
+             RETURNING id, name, description, created_at, updated_at",
+            &[&role_id, &team_id, &name, &description],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db) = e.as_db_error() {
+                if db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?
+        .ok_or(AppError::NotFound)?;
+    Ok(row_to_team_role(&row))
+}
+
+/// Delete a team role. Cascades to remove all member assignments for that role.
+pub async fn delete_team_role(pool: &Pool, team_id: Uuid, role_id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute(
+            "DELETE FROM team_roles WHERE id = $1 AND team_id = $2",
+            &[&role_id, &team_id],
+        )
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Assign a team role to an active team member.
+/// Returns Validation if the user is not an active member, Conflict if already assigned,
+/// or NotFound if the role does not belong to the given team.
+pub async fn assign_member_role(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    role_id: Uuid,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let affected = client
+        .execute(
+            "INSERT INTO team_member_roles (team_id, role_id, member_id)
+             SELECT $1, $2, tm.id
+             FROM team_members tm
+             WHERE tm.team_id = $1 AND tm.user_id = $3 AND tm.status = 'active'",
+            &[&team_id, &role_id, &user_id],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db) = e.as_db_error() {
+                return match db.code() {
+                    &tokio_postgres::error::SqlState::UNIQUE_VIOLATION => AppError::Conflict,
+                    &tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION => AppError::NotFound,
+                    _ => AppError::Database(e),
+                };
+            }
+            AppError::Database(e)
+        })?;
+    if affected == 0 {
+        return Err(AppError::Validation(
+            "user is not an active member of this team".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Remove a team role assignment from a member.
+pub async fn unassign_member_role(
+    pool: &Pool,
+    team_id: Uuid,
+    user_id: Uuid,
+    role_id: Uuid,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute(
+            "DELETE FROM team_member_roles tmr
+             USING team_members tm
+             WHERE tmr.role_id = $1
+               AND tmr.member_id = tm.id
+               AND tm.team_id = $2
+               AND tm.user_id = $3",
+            &[&role_id, &team_id, &user_id],
+        )
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1552,22 +1750,27 @@ fn row_to_team_summary(row: &tokio_postgres::Row) -> TeamSummary {
 fn row_to_team_response(
     team_row: &tokio_postgres::Row,
     member_rows: &[tokio_postgres::Row],
+    roles_by_member: &HashMap<Uuid, Vec<TeamRoleResponse>>,
 ) -> TeamResponse {
     let members = member_rows
         .iter()
-        .map(|r| TeamMemberResponse {
-            id: r.get("id"),
-            user: TeamUserRef {
-                id: r.get("user_id"),
-                username: r.get("username"),
-                email: r.get("email"),
-                first_name: r.get("first_name"),
-                last_name: r.get("last_name"),
-            },
-            status: r.get("status"),
-            role: r.get("role"),
-            invited_at: r.get("invited_at"),
-            joined_at: r.get("joined_at"),
+        .map(|r| {
+            let member_id: Uuid = r.get("id");
+            TeamMemberResponse {
+                id: member_id,
+                user: TeamUserRef {
+                    id: r.get("user_id"),
+                    username: r.get("username"),
+                    email: r.get("email"),
+                    first_name: r.get("first_name"),
+                    last_name: r.get("last_name"),
+                },
+                status: r.get("status"),
+                role: r.get("role"),
+                team_roles: roles_by_member.get(&member_id).cloned().unwrap_or_default(),
+                invited_at: r.get("invited_at"),
+                joined_at: r.get("joined_at"),
+            }
         })
         .collect();
 
@@ -1588,6 +1791,16 @@ fn row_to_team_response(
         members,
         created_at: team_row.get("created_at"),
         updated_at: team_row.get("updated_at"),
+    }
+}
+
+fn row_to_team_role(row: &tokio_postgres::Row) -> TeamRoleResponse {
+    TeamRoleResponse {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     }
 }
 

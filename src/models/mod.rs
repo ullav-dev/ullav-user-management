@@ -321,6 +321,16 @@ pub struct TeamUserRef {
     pub last_name: Option<String>,
 }
 
+/// A custom role defined within a team.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamRoleResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A team member as returned by API responses.
 #[derive(Debug, Clone, Serialize)]
 pub struct TeamMemberResponse {
@@ -330,6 +340,8 @@ pub struct TeamMemberResponse {
     pub status: String,
     /// `owner` | `leader` | `member` — derived from the team's owner_id / leader_id columns.
     pub role: String,
+    /// Custom team roles assigned to this member.
+    pub team_roles: Vec<TeamRoleResponse>,
     pub invited_at: DateTime<Utc>,
     pub joined_at: Option<DateTime<Utc>>,
 }
@@ -416,6 +428,20 @@ pub struct InviteTeamMemberRequest {
 #[derive(Debug, Deserialize)]
 pub struct ResendInviteRequest {
     pub app_url: Option<String>,
+}
+
+/// Request body for creating a team role.
+#[derive(Debug, Deserialize)]
+pub struct CreateTeamRoleRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// Request body for partially updating a team role.
+#[derive(Debug, Deserialize)]
+pub struct UpdateTeamRoleRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
 }
 
 /// Admin request body for directly adding an active member (bypasses invite flow).

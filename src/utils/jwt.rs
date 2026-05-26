@@ -39,6 +39,13 @@ pub struct TeamClaim {
     /// Defaults to an empty map so tokens issued before this field was added still decode.
     #[serde(default)]
     pub product_roles: HashMap<String, String>,
+    /// Product slugs that this team has enabled at the team level (from `team_product_access`).
+    /// Downstream services use this to gate access to a product for all team members.
+    /// A user may only access a product-gated service if they are a member of at least one
+    /// team that has the product enabled here.
+    /// Defaults to an empty vec so tokens issued before this field was added still decode.
+    #[serde(default)]
+    pub products: Vec<String>,
 }
 
 /// JWT claims embedded in the token.

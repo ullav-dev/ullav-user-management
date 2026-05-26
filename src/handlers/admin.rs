@@ -463,6 +463,8 @@ pub async fn list_team_products(
 }
 
 /// `POST /admin/teams/{id}/products/{slug}` — enable a product for a team.
+/// Requires `obair:manage` (in addition to the scope-level `users:read` gate).
+/// This is a contract-level operation — only platform admins may grant product access.
 #[post("/teams/{id}/products/{slug}")]
 pub async fn enable_team_product(
     state: web::Data<AppState>,
@@ -470,6 +472,9 @@ pub async fn enable_team_product(
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_from_req(&req)?;
+    if !claims.permissions.contains(&"obair:manage".to_string()) {
+        return Err(AppError::Forbidden);
+    }
     let admin_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
     let (team_id, product_slug) = path.into_inner();
     db::enable_team_product(&state.pool, team_id, &product_slug, admin_id).await?;
@@ -478,12 +483,17 @@ pub async fn enable_team_product(
 }
 
 /// `DELETE /admin/teams/{id}/products/{slug}` — disable a product for a team.
-/// Cascades: all member product roles for this product are revoked automatically.
+/// Requires `obair:manage`. Cascades: all member product roles are revoked automatically.
 #[delete("/teams/{id}/products/{slug}")]
 pub async fn disable_team_product(
     state: web::Data<AppState>,
+    req: HttpRequest,
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    if !claims.permissions.contains(&"obair:manage".to_string()) {
+        return Err(AppError::Forbidden);
+    }
     let (team_id, product_slug) = path.into_inner();
     db::disable_team_product(&state.pool, team_id, &product_slug).await?;
     Ok(HttpResponse::NoContent().finish())

@@ -19,6 +19,8 @@ pub struct ActiveTeamInfo {
     pub team_roles: Vec<String>,
     /// Product-specific access roles: product_slug → role (e.g. "obair" → "admin").
     pub product_roles: HashMap<String, String>,
+    /// Product slugs enabled for the team at the team level (from `team_product_access`).
+    pub products: Vec<String>,
 }
 
 /// Insert a new user into the database, returning the full row.
@@ -1470,7 +1472,12 @@ pub async fn get_user_active_teams(
                         FROM team_member_roles tmr2
                         JOIN team_roles tr2 ON tr2.id = tmr2.role_id
                         WHERE tmr2.member_id = tm.id
-                    ) AS team_role_names
+                    ) AS team_role_names,
+                    (
+                        SELECT COALESCE(ARRAY_AGG(tpa.product_slug ORDER BY tpa.product_slug), '{}'::text[])
+                        FROM team_product_access tpa
+                        WHERE tpa.team_id = t.id
+                    ) AS product_slugs
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
              WHERE tm.user_id = $1 AND tm.status = 'active'
@@ -1509,6 +1516,7 @@ pub async fn get_user_active_teams(
                 role: r.get("role"),
                 team_roles: r.get("team_role_names"),
                 product_roles,
+                products: r.get("product_slugs"),
             }
         })
         .collect())

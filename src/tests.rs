@@ -263,11 +263,11 @@ mod jwt_tests {
         let mut teams = HashMap::new();
         teams.insert(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Engineering".into(), role: "owner".into(), team_roles: vec!["Approver".into()], product_roles: HashMap::new() },
+            TeamClaim { name: "Engineering".into(), role: "owner".into(), team_roles: vec!["Approver".into()], product_roles: HashMap::new(), products: vec![] },
         );
         teams.insert(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Design".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new() },
+            TeamClaim { name: "Design".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new(), products: vec![] },
         );
         let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
             .expect("create_jwt should succeed");
@@ -298,7 +298,7 @@ mod jwt_tests {
         let mut teams = HashMap::new();
         teams.insert(
             team_id.clone(),
-            TeamClaim { name: "Engineering".into(), role: "owner".into(), team_roles: vec![], product_roles },
+            TeamClaim { name: "Engineering".into(), role: "owner".into(), team_roles: vec![], product_roles, products: vec![] },
         );
         let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
             .expect("create_jwt should succeed");
@@ -314,7 +314,7 @@ mod jwt_tests {
         // Simulate a token without product_roles (old format) — team_roles still present.
         let teams = HashMap::from([(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Ops".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new() },
+            TeamClaim { name: "Ops".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new(), products: vec![] },
         )]);
         let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
             .expect("create_jwt should succeed");

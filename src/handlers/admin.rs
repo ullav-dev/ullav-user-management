@@ -4,11 +4,12 @@ use crate::{
     models::{
         AdminAddTeamMemberRequest, AdminCreateSubscriptionRequest, AdminCreateTeamRequest,
         AdminUpdateSubscriptionRequest, AdminUpdateTeamRequest, AdminUpdateUserRequest,
-        CreatePermissionRequest, CreatePlanRequest, CreateRoleRequest,
+        AssignProductRoleRequest, CreatePermissionRequest, CreatePlanRequest, CreateRoleRequest,
     },
     AppState,
 };
-use actix_web::{delete, get, patch, post, web, HttpResponse};
+use actix_web::{delete, get, patch, post, web, HttpRequest, HttpResponse};
+use crate::middleware::auth::claims_from_req;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -426,5 +427,91 @@ pub async fn remove_team_member(
 ) -> Result<HttpResponse, AppError> {
     let (team_id, user_id) = path.into_inner();
     db::remove_team_member(&state.pool, team_id, user_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ── Admin: Team product access ────────────────────────────────────────────────
+
+/// Validate that `role` is a known value for the given product.
+/// Obair: "admin" | "lead" | "member". Other products: non-empty string.
+fn validate_product_role(product_slug: &str, role: &str) -> Result<(), AppError> {
+    match product_slug {
+        "obair" => {
+            if !matches!(role, "admin" | "lead" | "member") {
+                return Err(AppError::Validation(format!(
+                    "invalid obair role '{}': must be admin, lead, or member", role
+                )));
+            }
+        }
+        _ => {
+            if role.trim().is_empty() {
+                return Err(AppError::Validation("role must not be empty".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `GET /admin/teams/{id}/products` — list products enabled for the team.
+#[get("/teams/{id}/products")]
+pub async fn list_team_products(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let products = db::list_team_products(&state.pool, *path).await?;
+    Ok(HttpResponse::Ok().json(products))
+}
+
+/// `POST /admin/teams/{id}/products/{slug}` — enable a product for a team.
+#[post("/teams/{id}/products/{slug}")]
+pub async fn enable_team_product(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, String)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let admin_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, product_slug) = path.into_inner();
+    db::enable_team_product(&state.pool, team_id, &product_slug, admin_id).await?;
+    let products = db::list_team_products(&state.pool, team_id).await?;
+    Ok(HttpResponse::Ok().json(products))
+}
+
+/// `DELETE /admin/teams/{id}/products/{slug}` — disable a product for a team.
+/// Cascades: all member product roles for this product are revoked automatically.
+#[delete("/teams/{id}/products/{slug}")]
+pub async fn disable_team_product(
+    state: web::Data<AppState>,
+    path: web::Path<(Uuid, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (team_id, product_slug) = path.into_inner();
+    db::disable_team_product(&state.pool, team_id, &product_slug).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /admin/teams/{id}/members/{user_id}/product-roles/{slug}` — assign or update a product role.
+#[post("/teams/{id}/members/{user_id}/product-roles/{slug}")]
+pub async fn assign_member_product_role(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid, String)>,
+    body: web::Json<AssignProductRoleRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let admin_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+    let (team_id, user_id, product_slug) = path.into_inner();
+    validate_product_role(&product_slug, &body.role)?;
+    db::assign_member_product_role(&state.pool, team_id, user_id, &product_slug, &body.role, admin_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `DELETE /admin/teams/{id}/members/{user_id}/product-roles/{slug}` — revoke a product role.
+#[delete("/teams/{id}/members/{user_id}/product-roles/{slug}")]
+pub async fn revoke_member_product_role(
+    state: web::Data<AppState>,
+    path: web::Path<(Uuid, Uuid, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (team_id, user_id, product_slug) = path.into_inner();
+    db::revoke_member_product_role(&state.pool, team_id, user_id, &product_slug).await?;
     Ok(HttpResponse::NoContent().finish())
 }

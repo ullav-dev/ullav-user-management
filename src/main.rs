@@ -346,6 +346,9 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::teams::delete_team_role)
                     .service(handlers::teams::assign_member_role)
                     .service(handlers::teams::unassign_member_role)
+                    // Product roles — owner assigns product-specific roles to members
+                    .service(handlers::teams::assign_member_product_role)
+                    .service(handlers::teams::revoke_member_product_role)
                     // Health — requires `health:read`; use /health prefix to isolate
                     .service(
                         web::scope("/health")
@@ -395,7 +398,13 @@ async fn main() -> std::io::Result<()> {
                             .service(handlers::admin::update_team)
                             .service(handlers::admin::delete_team)
                             .service(handlers::admin::add_team_member)
-                            .service(handlers::admin::remove_team_member),
+                            .service(handlers::admin::remove_team_member)
+                            // Team product access
+                            .service(handlers::admin::list_team_products)
+                            .service(handlers::admin::enable_team_product)
+                            .service(handlers::admin::disable_team_product)
+                            .service(handlers::admin::assign_member_product_role)
+                            .service(handlers::admin::revoke_member_product_role),
                     ),
             )
             // Webhook endpoints — no auth, provider-signed payloads

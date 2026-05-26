@@ -263,11 +263,11 @@ mod jwt_tests {
         let mut teams = HashMap::new();
         teams.insert(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Engineering".into(), role: "owner".into(), team_roles: vec!["Approver".into()] },
+            TeamClaim { name: "Engineering".into(), role: "owner".into(), team_roles: vec!["Approver".into()], product_roles: HashMap::new() },
         );
         teams.insert(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Design".into(), role: "member".into(), team_roles: vec![] },
+            TeamClaim { name: "Design".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new() },
         );
         let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
             .expect("create_jwt should succeed");
@@ -286,6 +286,42 @@ mod jwt_tests {
             .expect("create_jwt should succeed");
         let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
         assert!(claims.teams.is_empty(), "teams map must be empty when no teams");
+    }
+
+    #[test]
+    fn test_jwt_product_roles_round_trip() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let team_id = Uuid::new_v4().to_string();
+        let mut product_roles = HashMap::new();
+        product_roles.insert("obair".to_string(), "admin".to_string());
+        let mut teams = HashMap::new();
+        teams.insert(
+            team_id.clone(),
+            TeamClaim { name: "Engineering".into(), role: "owner".into(), team_roles: vec![], product_roles },
+        );
+        let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+        let team = claims.teams.get(&team_id).expect("team must be present");
+        assert_eq!(team.product_roles.get("obair").map(|s| s.as_str()), Some("admin"));
+    }
+
+    #[test]
+    fn test_jwt_product_roles_default_empty_on_old_token() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        // Simulate a token without product_roles (old format) — team_roles still present.
+        let teams = HashMap::from([(
+            Uuid::new_v4().to_string(),
+            TeamClaim { name: "Ops".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new() },
+        )]);
+        let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+        for team in claims.teams.values() {
+            assert!(team.product_roles.is_empty(), "product_roles must default to empty");
+        }
     }
 }
 

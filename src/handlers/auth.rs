@@ -68,7 +68,7 @@ pub async fn login(
     let raw_teams = db::get_user_active_teams(&state.pool, user.id).await?;
     let teams: HashMap<String, TeamClaim> = raw_teams
         .into_iter()
-        .map(|t| (t.team_id, TeamClaim { name: t.name, role: t.role, team_roles: t.team_roles }))
+        .map(|t| (t.team_id, TeamClaim { name: t.name, role: t.role, team_roles: t.team_roles, product_roles: t.product_roles }))
         .collect();
 
     let token = create_jwt(

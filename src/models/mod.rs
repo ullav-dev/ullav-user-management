@@ -450,6 +450,21 @@ pub struct AdminAddTeamMemberRequest {
     pub user_id: Uuid,
 }
 
+/// A product that has been enabled for a team.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamProductAccessResponse {
+    pub product_slug: String,
+    pub product_name: String,
+    pub granted_at: DateTime<Utc>,
+    pub granted_by_username: Option<String>,
+}
+
+/// Request body for assigning or updating a product role for a team member.
+#[derive(Debug, Deserialize)]
+pub struct AssignProductRoleRequest {
+    pub role: String,
+}
+
 /// Admin request body for creating a team with an explicit owner.
 #[derive(Debug, Deserialize)]
 pub struct AdminCreateTeamRequest {

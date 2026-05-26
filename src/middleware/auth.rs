@@ -1,10 +1,19 @@
-use crate::utils::jwt::decode_jwt;
+use crate::{errors::AppError, utils::jwt::{Claims, decode_jwt}};
+use actix_web::HttpRequest;
 use actix_web::{
     body::EitherBody,
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     http::header,
     Error, HttpMessage, HttpResponse,
 };
+
+/// Extract the JWT [`Claims`] injected by [`AuthMiddleware`] from a handler's request.
+pub fn claims_from_req(req: &HttpRequest) -> Result<Claims, AppError> {
+    req.extensions()
+        .get::<Claims>()
+        .cloned()
+        .ok_or(AppError::InvalidToken)
+}
 use std::{
     future::{ready, Future, Ready},
     pin::Pin,

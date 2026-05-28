@@ -322,6 +322,8 @@ async fn main() -> std::io::Result<()> {
                     .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone()))
                     // Any authenticated user
                     .service(handlers::auth::change_password)
+                    .service(handlers::profile::get_me)
+                    .service(handlers::profile::update_me)
                     .service(handlers::subscriptions::get_current_subscription)
                     .service(handlers::subscriptions::create_checkout_session)
                     .service(handlers::subscriptions::create_portal_session)

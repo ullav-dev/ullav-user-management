@@ -90,6 +90,9 @@ pub async fn update_user(
         body.email.as_deref(),
         body.username.as_deref(),
         body.is_active,
+        body.first_name.as_ref().map(|o| o.as_deref()),
+        body.last_name.as_ref().map(|o| o.as_deref()),
+        body.avatar_url.as_ref().map(|o| o.as_deref()),
     )
     .await?;
     Ok(HttpResponse::Ok().json(user))

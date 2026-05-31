@@ -90,6 +90,9 @@ pub async fn update_user(
         body.email.as_deref(),
         body.username.as_deref(),
         body.is_active,
+        body.first_name.as_ref().map(|o| o.as_deref()),
+        body.last_name.as_ref().map(|o| o.as_deref()),
+        body.avatar_url.as_ref().map(|o| o.as_deref()),
     )
     .await?;
     Ok(HttpResponse::Ok().json(user))
@@ -436,10 +439,10 @@ pub async fn remove_team_member(
 /// Obair: "admin" | "lead" | "member". Other products: non-empty string.
 fn validate_product_role(product_slug: &str, role: &str) -> Result<(), AppError> {
     match product_slug {
-        "obair" => {
+        "obair" | "togra" => {
             if !matches!(role, "admin" | "lead" | "member") {
                 return Err(AppError::Validation(format!(
-                    "invalid obair role '{}': must be admin, lead, or member", role
+                    "invalid {} role '{}': must be admin, lead, or member", product_slug, role
                 )));
             }
         }
@@ -463,7 +466,7 @@ pub async fn list_team_products(
 }
 
 /// `POST /admin/teams/{id}/products/{slug}` — enable a product for a team.
-/// Requires `obair:manage` (in addition to the scope-level `users:read` gate).
+/// Requires `obair:manage` or `togra:manage` (in addition to the scope-level `users:read` gate).
 /// This is a contract-level operation — only platform admins may grant product access.
 #[post("/teams/{id}/products/{slug}")]
 pub async fn enable_team_product(
@@ -472,7 +475,9 @@ pub async fn enable_team_product(
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_from_req(&req)?;
-    if !claims.permissions.contains(&"obair:manage".to_string()) {
+    let has_manage = claims.permissions.contains(&"obair:manage".to_string())
+        || claims.permissions.contains(&"togra:manage".to_string());
+    if !has_manage {
         return Err(AppError::Forbidden);
     }
     let admin_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
@@ -483,7 +488,7 @@ pub async fn enable_team_product(
 }
 
 /// `DELETE /admin/teams/{id}/products/{slug}` — disable a product for a team.
-/// Requires `obair:manage`. Cascades: all member product roles are revoked automatically.
+/// Requires `obair:manage` or `togra:manage`. Cascades: all member product roles are revoked automatically.
 #[delete("/teams/{id}/products/{slug}")]
 pub async fn disable_team_product(
     state: web::Data<AppState>,
@@ -491,7 +496,9 @@ pub async fn disable_team_product(
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_from_req(&req)?;
-    if !claims.permissions.contains(&"obair:manage".to_string()) {
+    let has_manage = claims.permissions.contains(&"obair:manage".to_string())
+        || claims.permissions.contains(&"togra:manage".to_string());
+    if !has_manage {
         return Err(AppError::Forbidden);
     }
     let (team_id, product_slug) = path.into_inner();

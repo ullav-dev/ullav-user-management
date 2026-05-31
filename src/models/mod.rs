@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -11,6 +11,9 @@ pub struct UserWithRoles {
     pub email: String,
     pub username: String,
     pub is_active: bool,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub avatar_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub roles: Vec<String>,
@@ -26,11 +29,19 @@ pub struct UsersPage {
 }
 
 /// Admin request body for partial update of a user.
+/// Optional string fields use `Option<Option<String>>` so callers can distinguish
+/// "omit (no change)" from `null` (clear the field).
 #[derive(Debug, Deserialize)]
 pub struct AdminUpdateUserRequest {
     pub email: Option<String>,
     pub username: Option<String>,
     pub is_active: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub first_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub last_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub avatar_url: Option<Option<String>>,
 }
 
 /// A role together with its granted permission names.
@@ -129,6 +140,16 @@ pub struct CreatePlanRequest {
     pub name: String,
 }
 
+/// Deserializer that maps an absent field to `None` and a present field
+/// (including JSON `null`) to `Some(Option<String>)`. Allows PATCH endpoints to
+/// distinguish "omit → no change" from `null → clear the field`.
+pub fn deserialize_nullable_string<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(d)?))
+}
+
 /// A user account stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -140,6 +161,7 @@ pub struct User {
     pub is_active: bool,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+    pub avatar_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing)]
@@ -157,6 +179,7 @@ pub struct UserResponse {
     pub is_active: bool,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+    pub avatar_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -170,10 +193,22 @@ impl From<User> for UserResponse {
             is_active: u.is_active,
             first_name: u.first_name,
             last_name: u.last_name,
+            avatar_url: u.avatar_url,
             created_at: u.created_at,
             updated_at: u.updated_at,
         }
     }
+}
+
+/// Request body for `PATCH /users/me`.
+/// All fields are optional. `avatar_url` uses `Option<Option<String>>` so that
+/// `null` (clear) can be distinguished from absent (no change).
+#[derive(Debug, Deserialize)]
+pub struct UpdateProfileRequest {
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub avatar_url: Option<Option<String>>,
 }
 
 /// Request body for creating a new user.
@@ -319,6 +354,7 @@ pub struct TeamUserRef {
     pub email: String,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 /// A custom role defined within a team.

@@ -795,3 +795,61 @@ mod subscription_tests {
         assert!(json.contains('4'));
     }
 }
+
+#[cfg(test)]
+mod profile_tests {
+    use crate::handlers::profile::validate_avatar_url;
+
+    #[test]
+    fn test_avatar_url_valid_https() {
+        assert!(validate_avatar_url("https://www.gravatar.com/avatar/abc123").is_ok());
+        assert!(validate_avatar_url("https://cdn.example.com/avatars/user.png").is_ok());
+    }
+
+    #[test]
+    fn test_avatar_url_rejects_http() {
+        let err = validate_avatar_url("http://example.com/avatar.png").unwrap_err();
+        assert!(err.to_string().contains("HTTPS"), "expected HTTPS error, got: {}", err);
+    }
+
+    #[test]
+    fn test_avatar_url_rejects_non_url() {
+        let err = validate_avatar_url("javascript:alert(1)").unwrap_err();
+        assert!(err.to_string().contains("HTTPS"), "expected HTTPS error, got: {}", err);
+    }
+
+    #[test]
+    fn test_avatar_url_rejects_too_long() {
+        let url = format!("https://example.com/{}", "a".repeat(2048));
+        let err = validate_avatar_url(&url).unwrap_err();
+        assert!(err.to_string().contains("2048"), "expected length error, got: {}", err);
+    }
+
+    #[test]
+    fn test_update_profile_request_absent_avatar_is_none() {
+        use crate::models::UpdateProfileRequest;
+        let req: UpdateProfileRequest =
+            serde_json::from_str(r#"{"first_name": "Alice"}"#).unwrap();
+        assert!(req.avatar_url.is_none(), "absent avatar_url must be None");
+    }
+
+    #[test]
+    fn test_update_profile_request_null_avatar_is_some_none() {
+        use crate::models::UpdateProfileRequest;
+        let req: UpdateProfileRequest =
+            serde_json::from_str(r#"{"avatar_url": null}"#).unwrap();
+        assert_eq!(req.avatar_url, Some(None), "null avatar_url must be Some(None)");
+    }
+
+    #[test]
+    fn test_update_profile_request_string_avatar_is_some_some() {
+        use crate::models::UpdateProfileRequest;
+        let req: UpdateProfileRequest =
+            serde_json::from_str(r#"{"avatar_url": "https://example.com/a.png"}"#).unwrap();
+        assert_eq!(
+            req.avatar_url,
+            Some(Some("https://example.com/a.png".into())),
+            "string avatar_url must be Some(Some(...))"
+        );
+    }
+}

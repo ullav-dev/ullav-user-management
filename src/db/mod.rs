@@ -38,7 +38,7 @@ pub async fn create_user(
             "INSERT INTO users (email, username, password_hash, is_active, first_name, last_name)
              VALUES ($1, $2, $3, FALSE, $4, $5)
              RETURNING id, email, username, password_hash, is_active, first_name, last_name,
-                       created_at, updated_at, confirmation_token, confirmation_token_expires_at",
+                       avatar_url, created_at, updated_at, confirmation_token, confirmation_token_expires_at",
             &[&email, &username, &password_hash, &first_name, &last_name],
         )
         .await
@@ -61,7 +61,7 @@ pub async fn get_user_by_id(pool: &Pool, id: Uuid) -> Result<User, AppError> {
     let row = client
         .query_opt(
             "SELECT id, email, username, password_hash, is_active, first_name, last_name,
-                    created_at, updated_at, confirmation_token, confirmation_token_expires_at
+                    avatar_url, created_at, updated_at, confirmation_token, confirmation_token_expires_at
              FROM users WHERE id = $1",
             &[&id],
         )
@@ -77,7 +77,7 @@ pub async fn get_user_by_email(pool: &Pool, email: &str) -> Result<User, AppErro
     let row = client
         .query_opt(
             "SELECT id, email, username, password_hash, is_active, first_name, last_name,
-                    created_at, updated_at, confirmation_token, confirmation_token_expires_at
+                    avatar_url, created_at, updated_at, confirmation_token, confirmation_token_expires_at
              FROM users WHERE email = $1",
             &[&email],
         )
@@ -192,7 +192,7 @@ pub async fn get_user_by_confirmation_token(
     let row = client
         .query_opt(
             "SELECT id, email, username, password_hash, is_active, first_name, last_name,
-                    created_at, updated_at, confirmation_token, confirmation_token_expires_at
+                    avatar_url, created_at, updated_at, confirmation_token, confirmation_token_expires_at
              FROM users WHERE confirmation_token = $1",
             &[&token],
         )
@@ -525,6 +525,7 @@ fn row_to_user(row: &tokio_postgres::Row) -> User {
         is_active: row.get("is_active"),
         first_name: row.get("first_name"),
         last_name: row.get("last_name"),
+        avatar_url: row.get("avatar_url"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         confirmation_token: row.get("confirmation_token"),
@@ -558,6 +559,9 @@ fn row_to_user_with_roles(row: &tokio_postgres::Row) -> UserWithRoles {
         email: row.get("email"),
         username: row.get("username"),
         is_active: row.get("is_active"),
+        first_name: row.get("first_name"),
+        last_name: row.get("last_name"),
+        avatar_url: row.get("avatar_url"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         roles: row.get("roles"),
@@ -596,7 +600,7 @@ pub async fn list_users_paginated(
         let rows = client
             .query(
                 &format!(
-                    "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+                    "SELECT u.id, u.email, u.username, u.is_active, u.first_name, u.last_name, u.avatar_url, u.created_at, u.updated_at,
                             COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
                      FROM users u
                      LEFT JOIN user_roles ur ON ur.user_id = u.id
@@ -621,7 +625,7 @@ pub async fn list_users_paginated(
         let rows = client
             .query(
                 &format!(
-                    "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+                    "SELECT u.id, u.email, u.username, u.is_active, u.first_name, u.last_name, u.avatar_url, u.created_at, u.updated_at,
                             COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
                      FROM users u
                      LEFT JOIN user_roles ur ON ur.user_id = u.id
@@ -648,7 +652,7 @@ pub async fn get_user_with_roles(pool: &Pool, id: Uuid) -> Result<UserWithRoles,
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT u.id, u.email, u.username, u.is_active, u.created_at, u.updated_at,
+            "SELECT u.id, u.email, u.username, u.is_active, u.first_name, u.last_name, u.avatar_url, u.created_at, u.updated_at,
                     COALESCE(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL), ARRAY[]::text[]) AS roles
              FROM users u
              LEFT JOIN user_roles ur ON ur.user_id = u.id
@@ -662,24 +666,77 @@ pub async fn get_user_with_roles(pool: &Pool, id: Uuid) -> Result<UserWithRoles,
     Ok(row_to_user_with_roles(&row))
 }
 
-/// Partially update a user's profile. NULL params leave the column unchanged.
+/// Update a user's own profile fields. `avatar_url` uses two params to support
+/// clear (Some(None)) vs no-change (None) vs set (Some(Some(v))).
+pub async fn update_user_profile(
+    pool: &Pool,
+    user_id: Uuid,
+    first_name: Option<&str>,
+    last_name: Option<&str>,
+    avatar_url: Option<Option<&str>>,
+) -> Result<User, AppError> {
+    let clear_avatar = matches!(avatar_url, Some(None));
+    let new_avatar = avatar_url.flatten();
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "UPDATE users SET
+               first_name = COALESCE($2::text, first_name),
+               last_name  = COALESCE($3::text, last_name),
+               avatar_url = CASE
+                   WHEN $4::bool        THEN NULL
+                   WHEN $5::text IS NOT NULL THEN $5::text
+                   ELSE avatar_url
+               END,
+               updated_at = NOW()
+             WHERE id = $1
+             RETURNING id, email, username, password_hash, is_active, first_name, last_name,
+                       avatar_url, created_at, updated_at, confirmation_token,
+                       confirmation_token_expires_at",
+            &[&user_id, &first_name, &last_name, &clear_avatar, &new_avatar],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(row_to_user(&row))
+}
+
+/// Partially update a user's profile (admin). NULL params leave the column unchanged.
+/// For nullable text fields, pass Some(None) to clear and None to leave unchanged.
 pub async fn admin_update_user(
     pool: &Pool,
     id: Uuid,
     email: Option<&str>,
     username: Option<&str>,
     is_active: Option<bool>,
+    first_name: Option<Option<&str>>,
+    last_name: Option<Option<&str>>,
+    avatar_url: Option<Option<&str>>,
 ) -> Result<UserWithRoles, AppError> {
+    let clear_first_name = matches!(first_name, Some(None));
+    let new_first_name = first_name.flatten();
+    let clear_last_name = matches!(last_name, Some(None));
+    let new_last_name = last_name.flatten();
+    let clear_avatar = matches!(avatar_url, Some(None));
+    let new_avatar = avatar_url.flatten();
     let client = pool.get().await?;
     let updated = client
         .execute(
             "UPDATE users SET
-               email     = COALESCE($1, email),
-               username  = COALESCE($2, username),
-               is_active = COALESCE($3, is_active),
+               email      = COALESCE($1, email),
+               username   = COALESCE($2, username),
+               is_active  = COALESCE($3, is_active),
+               first_name = CASE WHEN $4 THEN NULL WHEN $5::text IS NOT NULL THEN $5 ELSE first_name END,
+               last_name  = CASE WHEN $6 THEN NULL WHEN $7::text IS NOT NULL THEN $7 ELSE last_name  END,
+               avatar_url = CASE WHEN $8 THEN NULL WHEN $9::text IS NOT NULL THEN $9 ELSE avatar_url  END,
                updated_at = NOW()
-             WHERE id = $4",
-            &[&email, &username, &is_active, &id],
+             WHERE id = $10",
+            &[
+                &email, &username, &is_active,
+                &clear_first_name, &new_first_name,
+                &clear_last_name, &new_last_name,
+                &clear_avatar, &new_avatar,
+                &id,
+            ],
         )
         .await?;
     if updated == 0 {
@@ -1136,9 +1193,11 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
+                    o.avatar_url AS owner_avatar_url,
                     t.leader_id,
                     l.username AS leader_username, l.email AS leader_email,
                     l.first_name AS leader_first_name, l.last_name AS leader_last_name,
+                    l.avatar_url AS leader_avatar_url,
                     t.created_at, t.updated_at
              FROM teams t
              JOIN users o ON o.id = t.owner_id
@@ -1152,7 +1211,7 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
     let member_rows = client
         .query(
             "SELECT tm.id, tm.user_id,
-                    u.username, u.email, u.first_name, u.last_name,
+                    u.username, u.email, u.first_name, u.last_name, u.avatar_url,
                     tm.status::text,
                     CASE
                         WHEN tm.user_id = t.owner_id  THEN 'owner'
@@ -1205,9 +1264,11 @@ pub async fn list_user_teams(pool: &Pool, user_id: Uuid) -> Result<Vec<TeamSumma
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
+                    o.avatar_url AS owner_avatar_url,
                     t.leader_id,
                     l.username AS leader_username, l.email AS leader_email,
                     l.first_name AS leader_first_name, l.last_name AS leader_last_name,
+                    l.avatar_url AS leader_avatar_url,
                     COUNT(m.id) FILTER (WHERE m.status = 'active') AS member_count,
                     t.created_at, t.updated_at
              FROM teams t
@@ -1553,9 +1614,11 @@ pub async fn list_teams_paginated(
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
+                    o.avatar_url AS owner_avatar_url,
                     t.leader_id,
                     l.username AS leader_username, l.email AS leader_email,
                     l.first_name AS leader_first_name, l.last_name AS leader_last_name,
+                    l.avatar_url AS leader_avatar_url,
                     COUNT(m.id) FILTER (WHERE m.status = 'active') AS member_count,
                     t.created_at, t.updated_at
              FROM teams t
@@ -1892,6 +1955,7 @@ fn row_to_team_user_ref(
     email_col: &str,
     first_name_col: &str,
     last_name_col: &str,
+    avatar_url_col: &str,
 ) -> TeamUserRef {
     TeamUserRef {
         id: row.get(id_col),
@@ -1899,6 +1963,7 @@ fn row_to_team_user_ref(
         email: row.get(email_col),
         first_name: row.get(first_name_col),
         last_name: row.get(last_name_col),
+        avatar_url: row.get(avatar_url_col),
     }
 }
 
@@ -1910,11 +1975,11 @@ fn row_to_team_summary(row: &tokio_postgres::Row) -> TeamSummary {
         avatar_url: row.get("avatar_url"),
         owner: row_to_team_user_ref(
             row, "owner_id", "owner_username", "owner_email",
-            "owner_first_name", "owner_last_name",
+            "owner_first_name", "owner_last_name", "owner_avatar_url",
         ),
         leader: row_to_team_user_ref(
             row, "leader_id", "leader_username", "leader_email",
-            "leader_first_name", "leader_last_name",
+            "leader_first_name", "leader_last_name", "leader_avatar_url",
         ),
         member_count: row.get("member_count"),
         created_at: row.get("created_at"),
@@ -1939,6 +2004,7 @@ fn row_to_team_response(
                     email: r.get("email"),
                     first_name: r.get("first_name"),
                     last_name: r.get("last_name"),
+                    avatar_url: r.get("avatar_url"),
                 },
                 status: r.get("status"),
                 role: r.get("role"),
@@ -1957,11 +2023,11 @@ fn row_to_team_response(
         avatar_url: team_row.get("avatar_url"),
         owner: row_to_team_user_ref(
             team_row, "owner_id", "owner_username", "owner_email",
-            "owner_first_name", "owner_last_name",
+            "owner_first_name", "owner_last_name", "owner_avatar_url",
         ),
         leader: row_to_team_user_ref(
             team_row, "leader_id", "leader_username", "leader_email",
-            "leader_first_name", "leader_last_name",
+            "leader_first_name", "leader_last_name", "leader_avatar_url",
         ),
         members,
         created_at: team_row.get("created_at"),

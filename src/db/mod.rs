@@ -2091,9 +2091,15 @@ pub async fn admin_list_user_teams(
     let client = pool.get().await?;
 
     // Fetch the user's active team memberships.
+    // Role is derived from teams.owner_id / leader_id — team_members has no role column.
     let team_rows = client
         .query(
-            "SELECT t.id, t.name, t.description, t.avatar_url, tm.role AS member_role
+            "SELECT t.id, t.name, t.description, t.avatar_url,
+                    CASE
+                        WHEN t.owner_id  = $1 THEN 'owner'
+                        WHEN t.leader_id = $1 THEN 'leader'
+                        ELSE 'member'
+                    END AS member_role
              FROM teams t
              JOIN team_members tm ON tm.team_id = t.id
              WHERE tm.user_id = $1 AND tm.status = 'active'

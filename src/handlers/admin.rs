@@ -130,6 +130,26 @@ pub async fn remove_user_role(
     Ok(HttpResponse::NoContent().finish())
 }
 
+/// `GET /admin/users/{id}/subscriptions` — list all subscriptions for a user.
+#[get("/users/{id}/subscriptions")]
+pub async fn list_user_subscriptions(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let subs = db::admin_list_user_subscriptions(&state.pool, *path).await?;
+    Ok(HttpResponse::Ok().json(subs))
+}
+
+/// `GET /admin/users/{id}/teams` — list teams a user belongs to, with enabled products.
+#[get("/users/{id}/teams")]
+pub async fn list_user_teams(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let teams = db::admin_list_user_teams(&state.pool, *path).await?;
+    Ok(HttpResponse::Ok().json(teams))
+}
+
 /// `POST /admin/users/{id}/subscriptions` — create a subscription for a user.
 #[post("/users/{id}/subscriptions")]
 pub async fn create_user_subscription(

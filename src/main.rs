@@ -375,6 +375,8 @@ async fn main() -> std::io::Result<()> {
                             .service(handlers::admin::delete_user)
                             .service(handlers::admin::add_user_role)
                             .service(handlers::admin::remove_user_role)
+                            .service(handlers::admin::list_user_subscriptions)
+                            .service(handlers::admin::list_user_teams)
                             .service(handlers::admin::create_user_subscription)
                             // Roles & permissions
                             .service(handlers::admin::list_roles)

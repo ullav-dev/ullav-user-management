@@ -14,6 +14,7 @@ use crate::{
     AppState,
 };
 use actix_web::{get, post, put, web, HttpMessage, HttpRequest, HttpResponse};
+use crate::middleware::auth::claims_from_req;
 use chrono::Utc;
 use deadpool_postgres::Pool;
 use std::collections::HashMap;
@@ -95,6 +96,80 @@ pub async fn login(
     };
 
     Ok(HttpResponse::Ok().json(response))
+}
+
+/// `POST /auth/refresh` — Re-issue a fresh JWT for an already-authenticated user.
+///
+/// Requires a valid JWT (injected by `AuthMiddleware`). Re-queries the DB so the
+/// new token reflects current team memberships, roles, and subscriptions — useful
+/// after creating or joining a team, where the old token predates the membership.
+#[post("/auth/refresh")]
+pub async fn refresh(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let user_id: Uuid = claims
+        .sub
+        .parse()
+        .map_err(|_| AppError::InvalidToken)?;
+
+    let user = db::get_user_by_id(&state.pool, user_id).await?;
+
+    let (roles, mut permissions) =
+        db::get_user_roles_and_permissions(&state.pool, user_id).await?;
+
+    let raw_subs = db::get_all_user_subscriptions(&state.pool, user_id).await?;
+    let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
+        .into_iter()
+        .map(|s| {
+            let claim = SubscriptionClaim {
+                tier: s.plan.clone(),
+                status: s.status.clone(),
+                seat_count: if s.seat_count > 1 { Some(s.seat_count) } else { None },
+            };
+            (s.product_slug, claim)
+        })
+        .collect();
+
+    let clann_eligible = subscriptions.get("clann").map_or(false, |s| {
+        matches!(s.status.as_str(), "active" | "trialing")
+            && matches!(s.tier.as_str(), "family" | "professional" | "enterprise")
+    });
+    if clann_eligible && !permissions.contains(&"teams:create".to_string()) {
+        permissions.push("teams:create".to_string());
+        permissions.sort();
+    }
+
+    let raw_teams = db::get_user_active_teams(&state.pool, user_id).await?;
+    let teams: HashMap<String, TeamClaim> = raw_teams
+        .into_iter()
+        .map(|t| (t.team_id, TeamClaim {
+            name: t.name,
+            role: t.role,
+            team_roles: t.team_roles,
+            product_roles: t.product_roles,
+            products: t.products,
+        }))
+        .collect();
+
+    let token = create_jwt(
+        user.id,
+        user.username.clone(),
+        &state.jwt_secret,
+        state.jwt_ttl_hours,
+        roles.clone(),
+        permissions.clone(),
+        subscriptions,
+        teams,
+    )?;
+
+    Ok(HttpResponse::Ok().json(LoginResponse {
+        token,
+        user: user.into(),
+        roles,
+        permissions,
+    }))
 }
 
 /// `PUT /users/{id}/password` — Change a user's password.

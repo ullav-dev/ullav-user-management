@@ -495,6 +495,26 @@ pub struct TeamProductAccessResponse {
     pub granted_by_username: Option<String>,
 }
 
+/// A product enabled for a team — minimal slug+name for embedding in per-user responses.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamProductRef {
+    pub slug: String,
+    pub name: String,
+}
+
+/// A team a user belongs to, with the products that team has enabled.
+/// Used by `GET /admin/users/{id}/teams`.
+#[derive(Debug, Serialize)]
+pub struct UserTeamAccess {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub avatar_url: Option<String>,
+    /// The user's role in this team: "owner", "leader", or "member".
+    pub member_role: String,
+    pub products: Vec<TeamProductRef>,
+}
+
 /// Request body for assigning or updating a product role for a team member.
 #[derive(Debug, Deserialize)]
 pub struct AssignProductRoleRequest {

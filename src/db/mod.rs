@@ -2,8 +2,8 @@ use crate::errors::AppError;
 use crate::models::{
     AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
     Subscription, SubscriptionsPage, TeamMemberResponse, TeamMemberRow, TeamProductAccessResponse,
-    TeamResponse, TeamRoleResponse, TeamSummary, TeamUserRef, TeamsPage, User, UserWithRoles,
-    UsersPage,
+    TeamProductRef, TeamResponse, TeamRoleResponse, TeamSummary, TeamUserRef, TeamsPage, User,
+    UserTeamAccess, UserWithRoles, UsersPage,
 };
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
@@ -1589,6 +1589,7 @@ pub async fn list_teams_paginated(
     page: i64,
     page_size: i64,
     search: &str,
+    product_slug: &str,
 ) -> Result<TeamsPage, AppError> {
     let client = pool.get().await?;
     let offset = (page - 1) * page_size;
@@ -1598,12 +1599,18 @@ pub async fn list_teams_paginated(
         format!("%{}%", search.to_lowercase())
     };
 
+    // Empty product_slug means "all teams"; non-empty restricts to teams
+    // that have the given product enabled in team_product_access.
     let total_row = client
         .query_one(
             "SELECT COUNT(*) FROM teams t
              JOIN users o ON o.id = t.owner_id
-             WHERE LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1",
-            &[&pattern],
+             WHERE (LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1)
+               AND ($2 = '' OR EXISTS (
+                   SELECT 1 FROM team_product_access tpa
+                   WHERE tpa.team_id = t.id AND tpa.product_slug = $2
+               ))",
+            &[&pattern, &product_slug],
         )
         .await?;
     let total: i64 = total_row.get(0);
@@ -1625,11 +1632,15 @@ pub async fn list_teams_paginated(
              JOIN users o ON o.id = t.owner_id
              JOIN users l ON l.id = t.leader_id
              LEFT JOIN team_members m ON m.team_id = t.id
-             WHERE LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1
+             WHERE (LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1)
+               AND ($2 = '' OR EXISTS (
+                   SELECT 1 FROM team_product_access tpa
+                   WHERE tpa.team_id = t.id AND tpa.product_slug = $2
+               ))
              GROUP BY t.id, o.id, l.id
              ORDER BY t.name
-             LIMIT $2 OFFSET $3",
-            &[&pattern, &page_size, &offset],
+             LIMIT $3 OFFSET $4",
+            &[&pattern, &product_slug, &page_size, &offset],
         )
         .await?;
 
@@ -2055,4 +2066,104 @@ fn row_to_team_member_row(row: &tokio_postgres::Row) -> TeamMemberRow {
         invited_at: row.get("invited_at"),
         joined_at: row.get("joined_at"),
     }
+}
+
+// ── Admin per-user access queries ─────────────────────────────────────────────
+
+/// `GET /admin/users/{id}/subscriptions` — all subscriptions for one user.
+pub async fn admin_list_user_subscriptions(
+    pool: &Pool,
+    user_id: Uuid,
+) -> Result<Vec<AdminSubscription>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT s.id, s.user_id, u.username, u.email,
+                    p.slug AS product, p.name AS product_name,
+                    s.plan, s.status, s.seat_count,
+                    s.trial_end, s.current_period_start, s.current_period_end,
+                    s.created_at, s.updated_at
+             FROM subscriptions s
+             JOIN users    u ON u.id = s.user_id
+             JOIN products p ON p.id = s.product_id
+             WHERE s.user_id = $1
+             ORDER BY p.name, s.created_at DESC",
+            &[&user_id],
+        )
+        .await?;
+    Ok(rows.iter().map(row_to_admin_subscription).collect())
+}
+
+/// `GET /admin/users/{id}/teams` — teams a user belongs to, with enabled products per team.
+pub async fn admin_list_user_teams(
+    pool: &Pool,
+    user_id: Uuid,
+) -> Result<Vec<UserTeamAccess>, AppError> {
+    let client = pool.get().await?;
+
+    // Fetch the user's active team memberships.
+    // Role is derived from teams.owner_id / leader_id — team_members has no role column.
+    let team_rows = client
+        .query(
+            "SELECT t.id, t.name, t.description, t.avatar_url,
+                    CASE
+                        WHEN t.owner_id  = $1 THEN 'owner'
+                        WHEN t.leader_id = $1 THEN 'leader'
+                        ELSE 'member'
+                    END AS member_role
+             FROM teams t
+             JOIN team_members tm ON tm.team_id = t.id
+             WHERE tm.user_id = $1 AND tm.status = 'active'
+             ORDER BY t.name",
+            &[&user_id],
+        )
+        .await?;
+
+    if team_rows.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let team_ids: Vec<Uuid> = team_rows.iter().map(|r| r.get("id")).collect();
+
+    // Fetch all product grants for those teams in one query.
+    let product_rows = client
+        .query(
+            "SELECT tpa.team_id, tpa.product_slug, p.name AS product_name
+             FROM team_product_access tpa
+             JOIN products p ON p.slug = tpa.product_slug
+             WHERE tpa.team_id = ANY($1)
+             ORDER BY p.name",
+            &[&team_ids],
+        )
+        .await?;
+
+    // Group products by team_id.
+    let mut products_by_team: HashMap<Uuid, Vec<TeamProductRef>> = HashMap::new();
+    for row in &product_rows {
+        let tid: Uuid = row.get("team_id");
+        products_by_team
+            .entry(tid)
+            .or_default()
+            .push(TeamProductRef {
+                slug: row.get("product_slug"),
+                name: row.get("product_name"),
+            });
+    }
+
+    let result = team_rows
+        .iter()
+        .map(|r| {
+            let id: Uuid = r.get("id");
+            UserTeamAccess {
+                id,
+                name: r.get("name"),
+                description: r.get("description"),
+                avatar_url: r.get("avatar_url"),
+                member_role: r.get("member_role"),
+                products: products_by_team.remove(&id).unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    Ok(result)
 }

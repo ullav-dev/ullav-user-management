@@ -321,6 +321,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("")
                     .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone()))
                     // Any authenticated user
+                    .service(handlers::auth::refresh)
                     .service(handlers::auth::change_password)
                     .service(handlers::profile::get_me)
                     .service(handlers::profile::update_me)

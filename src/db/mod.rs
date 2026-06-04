@@ -1589,6 +1589,7 @@ pub async fn list_teams_paginated(
     page: i64,
     page_size: i64,
     search: &str,
+    product_slug: &str,
 ) -> Result<TeamsPage, AppError> {
     let client = pool.get().await?;
     let offset = (page - 1) * page_size;
@@ -1598,12 +1599,18 @@ pub async fn list_teams_paginated(
         format!("%{}%", search.to_lowercase())
     };
 
+    // Empty product_slug means "all teams"; non-empty restricts to teams
+    // that have the given product enabled in team_product_access.
     let total_row = client
         .query_one(
             "SELECT COUNT(*) FROM teams t
              JOIN users o ON o.id = t.owner_id
-             WHERE LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1",
-            &[&pattern],
+             WHERE (LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1)
+               AND ($2 = '' OR EXISTS (
+                   SELECT 1 FROM team_product_access tpa
+                   WHERE tpa.team_id = t.id AND tpa.product_slug = $2
+               ))",
+            &[&pattern, &product_slug],
         )
         .await?;
     let total: i64 = total_row.get(0);
@@ -1625,11 +1632,15 @@ pub async fn list_teams_paginated(
              JOIN users o ON o.id = t.owner_id
              JOIN users l ON l.id = t.leader_id
              LEFT JOIN team_members m ON m.team_id = t.id
-             WHERE LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1
+             WHERE (LOWER(t.name) LIKE $1 OR LOWER(o.username) LIKE $1)
+               AND ($2 = '' OR EXISTS (
+                   SELECT 1 FROM team_product_access tpa
+                   WHERE tpa.team_id = t.id AND tpa.product_slug = $2
+               ))
              GROUP BY t.id, o.id, l.id
              ORDER BY t.name
-             LIMIT $2 OFFSET $3",
-            &[&pattern, &page_size, &offset],
+             LIMIT $3 OFFSET $4",
+            &[&pattern, &product_slug, &page_size, &offset],
         )
         .await?;
 

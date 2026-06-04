@@ -351,15 +351,21 @@ pub struct TeamsQuery {
     pub page_size: i64,
     #[serde(default)]
     pub search: String,
+    /// Optional product slug — when set, returns only teams with that product enabled.
+    #[serde(default)]
+    pub product: String,
 }
 
 /// `GET /admin/teams` — paginated list of all teams.
+/// Optional `?product=<slug>` restricts to teams with that product enabled.
 #[get("/teams")]
 pub async fn list_teams(
     state: web::Data<AppState>,
     query: web::Query<TeamsQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let page = db::list_teams_paginated(&state.pool, query.page, query.page_size, &query.search).await?;
+    let page = db::list_teams_paginated(
+        &state.pool, query.page, query.page_size, &query.search, &query.product,
+    ).await?;
     Ok(HttpResponse::Ok().json(page))
 }
 

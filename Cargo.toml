@@ -1,6 +1,6 @@
 [package]
 name = "user_management"
-version = "26.1.0"
+version = "26.2.0"
 edition = "2021"
 
 [[bin]]

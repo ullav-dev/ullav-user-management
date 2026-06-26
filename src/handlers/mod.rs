@@ -5,4 +5,5 @@ pub mod health;
 pub mod profile;
 pub mod subscriptions;
 pub mod teams;
+pub mod user_ai_settings;
 pub mod users;

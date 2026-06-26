@@ -1,5 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 // ── Admin models ──────────────────────────────────────────────────────────────
@@ -378,6 +379,8 @@ pub struct TeamMemberResponse {
     pub role: String,
     /// Custom team roles assigned to this member.
     pub team_roles: Vec<TeamRoleResponse>,
+    /// Product-specific roles assigned to this member (e.g. `"cunav"` → `"support"`).
+    pub product_roles: HashMap<String, String>,
     pub invited_at: DateTime<Utc>,
     pub joined_at: Option<DateTime<Utc>>,
 }

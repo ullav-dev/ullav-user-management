@@ -1252,7 +1252,22 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
         });
     }
 
-    Ok(row_to_team_response(&team_row, &member_rows, &roles_by_member))
+    // Fetch per-member product roles for this team.
+    let product_role_rows = client
+        .query(
+            "SELECT user_id, product_slug, role FROM team_member_product_roles WHERE team_id = $1",
+            &[&team_id],
+        )
+        .await?;
+    let mut product_roles_by_user: HashMap<Uuid, HashMap<String, String>> = HashMap::new();
+    for row in &product_role_rows {
+        let user_id: Uuid = row.get("user_id");
+        let slug: String = row.get("product_slug");
+        let role: String = row.get("role");
+        product_roles_by_user.entry(user_id).or_default().insert(slug, role);
+    }
+
+    Ok(row_to_team_response(&team_row, &member_rows, &roles_by_member, &product_roles_by_user))
 }
 
 /// List teams where the user is an active member, returning lightweight summaries.
@@ -2002,15 +2017,17 @@ fn row_to_team_response(
     team_row: &tokio_postgres::Row,
     member_rows: &[tokio_postgres::Row],
     roles_by_member: &HashMap<Uuid, Vec<TeamRoleResponse>>,
+    product_roles_by_user: &HashMap<Uuid, HashMap<String, String>>,
 ) -> TeamResponse {
     let members = member_rows
         .iter()
         .map(|r| {
             let member_id: Uuid = r.get("id");
+            let user_id: Uuid = r.get("user_id");
             TeamMemberResponse {
                 id: member_id,
                 user: TeamUserRef {
-                    id: r.get("user_id"),
+                    id: user_id,
                     username: r.get("username"),
                     email: r.get("email"),
                     first_name: r.get("first_name"),
@@ -2020,6 +2037,7 @@ fn row_to_team_response(
                 status: r.get("status"),
                 role: r.get("role"),
                 team_roles: roles_by_member.get(&member_id).cloned().unwrap_or_default(),
+                product_roles: product_roles_by_user.get(&user_id).cloned().unwrap_or_default(),
                 invited_at: r.get("invited_at"),
                 joined_at: r.get("joined_at"),
             }

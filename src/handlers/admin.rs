@@ -3,15 +3,18 @@ use crate::{
     errors::AppError,
     models::{
         AdminAddTeamMemberRequest, AdminCreateSubscriptionRequest, AdminCreateTeamRequest,
-        AdminUpdateSubscriptionRequest, AdminUpdateTeamRequest, AdminUpdateUserRequest,
-        AssignProductRoleRequest, CreatePermissionRequest, CreatePlanRequest, CreateRoleRequest,
+        AdminCreateUserRequest, AdminUpdateSubscriptionRequest, AdminUpdateTeamRequest,
+        AdminUpdateUserRequest, AssignProductRoleRequest, CreatePermissionRequest,
+        CreatePlanRequest, CreateRoleRequest,
     },
     AppState,
 };
 use actix_web::{delete, get, patch, post, web, HttpRequest, HttpResponse};
 use crate::middleware::auth::claims_from_req;
+use crate::utils::password::{hash_password, validate_password};
 use serde::Deserialize;
 use uuid::Uuid;
+use crate::utils::rs256::RsaKeyPair;
 
 // ── Query params ──────────────────────────────────────────────────────────────
 
@@ -106,6 +109,37 @@ pub async fn delete_user(
 ) -> Result<HttpResponse, AppError> {
     db::admin_delete_user(&state.pool, *path).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /admin/users` — create a pre-confirmed, active user (admin provisioning).
+#[post("/users")]
+pub async fn create_user(
+    state: web::Data<AppState>,
+    body: web::Json<AdminCreateUserRequest>,
+) -> Result<HttpResponse, AppError> {
+    validate_password(&body.password)?;
+
+    if body.email.is_empty() || !body.email.contains('@') {
+        return Err(AppError::Validation("invalid email address".into()));
+    }
+    if body.username.is_empty() {
+        return Err(AppError::Validation("username must not be empty".into()));
+    }
+
+    let hash = hash_password(&body.password)?;
+    let user = db::admin_create_user(
+        &state.pool,
+        &body.email,
+        &body.username,
+        &hash,
+        body.first_name.as_deref(),
+        body.last_name.as_deref(),
+    )
+    .await?;
+
+    db::assign_role(&state.pool, user.id, "user").await?;
+    let user_with_roles = db::get_user_with_roles(&state.pool, user.id).await?;
+    Ok(HttpResponse::Created().json(user_with_roles))
 }
 
 /// `POST /admin/users/{id}/roles/{role}` — assign a role to a user.
@@ -557,4 +591,96 @@ pub async fn revoke_member_product_role(
     let (team_id, user_id, product_slug) = path.into_inner();
     db::revoke_member_product_role(&state.pool, team_id, user_id, &product_slug).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+// ── OAuth2 key management ─────────────────────────────────────────────────────
+// These endpoints live under `/admin/oauth2` and require the `oauth2:manage`
+// permission (enforced by the router's scope middleware).
+
+/// `GET /admin/oauth2/keys` — list all signing keys including retired ones.
+#[get("/keys")]
+pub async fn list_oauth2_keys(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+    let keys = db::oauth2::list_all_signing_keys(&state.pool).await?;
+    Ok(HttpResponse::Ok().json(keys))
+}
+
+/// `POST /admin/oauth2/keys/generate` — generate a new RSA-2048 key and store it encrypted.
+///
+/// Only available in DB-backed mode (`OAUTH2_KEY_ENCRYPTION_KEY` must be set).
+/// The new key is NOT promoted to primary automatically — call `/promote` when ready.
+#[post("/keys/generate")]
+pub async fn generate_oauth2_key(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+    let kek = state.kek.as_ref().ok_or_else(|| AppError::Validation(
+        "key generation requires DB-backed mode (OAUTH2_KEY_ENCRYPTION_KEY must be set)".into(),
+    ))?;
+
+    let (pair, pem) = RsaKeyPair::generate()?;
+    let kid = pair.kid().to_owned();
+    let (enc, nonce) = kek.encrypt(pem.trim())?;
+    db::oauth2::store_signing_key(&state.pool, &kid, &enc, &nonce, false).await?;
+
+    // Add to in-memory store so it appears in JWKS immediately (clients can begin trusting it).
+    state.oauth2_keys.write().await.keys.push(pair);
+
+    log::info!("OAuth2: generated new signing key — kid: {kid}");
+    Ok(HttpResponse::Created().json(serde_json::json!({ "kid": kid, "status": "generated" })))
+}
+
+/// `POST /admin/oauth2/keys/{kid}/promote` — promote a key to primary.
+///
+/// The promoted key will be used to sign all new tokens. The previous primary is
+/// demoted but remains active in JWKS until its tokens expire.
+#[post("/keys/{kid}/promote")]
+pub async fn promote_oauth2_key(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let kid = path.into_inner();
+
+    // Verify the kid exists in the in-memory store before touching the DB.
+    {
+        let store = state.oauth2_keys.read().await;
+        if !store.keys.iter().any(|k| k.kid() == kid) {
+            return Err(AppError::NotFound);
+        }
+    }
+
+    db::oauth2::promote_signing_key(&state.pool, &kid).await?;
+
+    // Update in-memory primary_kid atomically.
+    state.oauth2_keys.write().await.primary_kid = kid.clone();
+
+    log::info!("OAuth2: promoted signing key to primary — kid: {kid}");
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "kid": kid, "status": "promoted" })))
+}
+
+/// `POST /admin/oauth2/keys/{kid}/retire` — retire a signing key.
+///
+/// Retired keys are removed from JWKS immediately. Any tokens signed with this key
+/// will begin failing validation, so only retire a key after all tokens it signed
+/// have expired (typically after the access token TTL has passed).
+/// The primary key cannot be retired.
+#[post("/keys/{kid}/retire")]
+pub async fn retire_oauth2_key(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let kid = path.into_inner();
+
+    {
+        let store = state.oauth2_keys.read().await;
+        if store.primary_kid == kid {
+            return Err(AppError::Validation(
+                "cannot retire the primary key — promote another key first".into(),
+            ));
+        }
+    }
+
+    db::oauth2::retire_signing_key(&state.pool, &kid).await?;
+
+    // Remove from in-memory store so JWKS stops advertising it immediately.
+    state.oauth2_keys.write().await.keys.retain(|k| k.kid() != kid);
+
+    log::info!("OAuth2: retired signing key — kid: {kid}");
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "kid": kid, "status": "retired" })))
 }

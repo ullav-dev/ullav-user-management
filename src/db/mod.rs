@@ -1,3 +1,5 @@
+pub mod oauth2;
+
 use crate::errors::AppError;
 use crate::models::{
     AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
@@ -44,6 +46,37 @@ pub async fn create_user(
         .await
         .map_err(|e| {
             // PostgreSQL unique-violation code is 23505
+            if let Some(db_err) = e.as_db_error() {
+                if db_err.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+
+    Ok(row_to_user(&row))
+}
+
+/// Create a new user as immediately active (admin provisioning, no email confirmation).
+pub async fn admin_create_user(
+    pool: &Pool,
+    email: &str,
+    username: &str,
+    password_hash: &str,
+    first_name: Option<&str>,
+    last_name: Option<&str>,
+) -> Result<User, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "INSERT INTO users (email, username, password_hash, is_active, first_name, last_name)
+             VALUES ($1, $2, $3, TRUE, $4, $5)
+             RETURNING id, email, username, password_hash, is_active, first_name, last_name,
+                       avatar_url, created_at, updated_at, confirmation_token, confirmation_token_expires_at",
+            &[&email, &username, &password_hash, &first_name, &last_name],
+        )
+        .await
+        .map_err(|e| {
             if let Some(db_err) = e.as_db_error() {
                 if db_err.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
                     return AppError::Conflict;
@@ -1252,7 +1285,22 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
         });
     }
 
-    Ok(row_to_team_response(&team_row, &member_rows, &roles_by_member))
+    // Fetch per-member product roles for this team.
+    let product_role_rows = client
+        .query(
+            "SELECT user_id, product_slug, role FROM team_member_product_roles WHERE team_id = $1",
+            &[&team_id],
+        )
+        .await?;
+    let mut product_roles_by_user: HashMap<Uuid, HashMap<String, String>> = HashMap::new();
+    for row in &product_role_rows {
+        let user_id: Uuid = row.get("user_id");
+        let slug: String = row.get("product_slug");
+        let role: String = row.get("role");
+        product_roles_by_user.entry(user_id).or_default().insert(slug, role);
+    }
+
+    Ok(row_to_team_response(&team_row, &member_rows, &roles_by_member, &product_roles_by_user))
 }
 
 /// List teams where the user is an active member, returning lightweight summaries.
@@ -2002,15 +2050,17 @@ fn row_to_team_response(
     team_row: &tokio_postgres::Row,
     member_rows: &[tokio_postgres::Row],
     roles_by_member: &HashMap<Uuid, Vec<TeamRoleResponse>>,
+    product_roles_by_user: &HashMap<Uuid, HashMap<String, String>>,
 ) -> TeamResponse {
     let members = member_rows
         .iter()
         .map(|r| {
             let member_id: Uuid = r.get("id");
+            let user_id: Uuid = r.get("user_id");
             TeamMemberResponse {
                 id: member_id,
                 user: TeamUserRef {
-                    id: r.get("user_id"),
+                    id: user_id,
                     username: r.get("username"),
                     email: r.get("email"),
                     first_name: r.get("first_name"),
@@ -2020,6 +2070,7 @@ fn row_to_team_response(
                 status: r.get("status"),
                 role: r.get("role"),
                 team_roles: roles_by_member.get(&member_id).cloned().unwrap_or_default(),
+                product_roles: product_roles_by_user.get(&user_id).cloned().unwrap_or_default(),
                 invited_at: r.get("invited_at"),
                 joined_at: r.get("joined_at"),
             }

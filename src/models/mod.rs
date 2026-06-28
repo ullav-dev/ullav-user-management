@@ -1,5 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 // ── Admin models ──────────────────────────────────────────────────────────────
@@ -211,6 +212,16 @@ pub struct UpdateProfileRequest {
     pub avatar_url: Option<Option<String>>,
 }
 
+/// Request body for `POST /admin/users` — create a pre-confirmed, active user.
+#[derive(Debug, Deserialize)]
+pub struct AdminCreateUserRequest {
+    pub email: String,
+    pub username: String,
+    pub password: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+}
+
 /// Request body for creating a new user.
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
@@ -378,6 +389,8 @@ pub struct TeamMemberResponse {
     pub role: String,
     /// Custom team roles assigned to this member.
     pub team_roles: Vec<TeamRoleResponse>,
+    /// Product-specific roles assigned to this member (e.g. `"cunav"` → `"support"`).
+    pub product_roles: HashMap<String, String>,
     pub invited_at: DateTime<Utc>,
     pub joined_at: Option<DateTime<Utc>>,
 }

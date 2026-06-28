@@ -8,15 +8,17 @@ use crate::{
     utils::{
         app_url::resolve_app_url,
         email::send_password_reset_email,
-        jwt::{create_jwt, decode_jwt, Claims, SubscriptionClaim, TeamClaim},
+        jwt::{create_jwt, create_jwt_rs256, decode_jwt, Claims, SubscriptionClaim, TeamClaim},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
     AppState,
 };
-use actix_web::{get, post, put, web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{cookie::{Cookie, SameSite}, get, post, put, web, HttpMessage, HttpRequest, HttpResponse};
 use crate::middleware::auth::claims_from_req;
 use chrono::Utc;
 use deadpool_postgres::Pool;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -78,16 +80,20 @@ pub async fn login(
         }))
         .collect();
 
-    let token = create_jwt(
+    let signing_key = state.oauth2_keys.read().await.primary_key().clone();
+    let token = create_jwt_rs256(
         user.id,
         user.username.clone(),
-        &state.jwt_secret,
+        &state.oauth2_issuer,
         state.jwt_ttl_hours,
         roles.clone(),
         permissions.clone(),
         subscriptions,
         teams,
+        &signing_key,
     )?;
+    // Capture user.id before user is consumed by .into().
+    let user_id = user.id;
     let response = LoginResponse {
         token,
         user: user.into(),
@@ -95,7 +101,23 @@ pub async fn login(
         permissions,
     };
 
-    Ok(HttpResponse::Ok().json(response))
+    // Create an SSO session cookie so the OAuth2 authorize endpoint can offer
+    // one-click consent when the user has already logged in via the portal.
+    let mut session_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut session_bytes);
+    let session_raw = hex::encode(session_bytes);
+    let session_hash = hex::encode(Sha256::digest(session_raw.as_bytes()));
+    if let Err(e) = db::oauth2::create_user_session(&state.pool, &session_hash, user_id, 30).await {
+        log::warn!("Failed to persist session cookie for user {user_id}: {e}");
+    }
+    let session_cookie = Cookie::build("ullav_session", session_raw)
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(actix_web::cookie::time::Duration::days(30))
+        .finish();
+
+    Ok(HttpResponse::Ok().cookie(session_cookie).json(response))
 }
 
 /// `POST /auth/refresh` — Re-issue a fresh JWT for an already-authenticated user.
@@ -153,15 +175,17 @@ pub async fn refresh(
         }))
         .collect();
 
-    let token = create_jwt(
+    let signing_key = state.oauth2_keys.read().await.primary_key().clone();
+    let token = create_jwt_rs256(
         user.id,
         user.username.clone(),
-        &state.jwt_secret,
+        &state.oauth2_issuer,
         state.jwt_ttl_hours,
         roles.clone(),
         permissions.clone(),
         subscriptions,
         teams,
+        &signing_key,
     )?;
 
     Ok(HttpResponse::Ok().json(LoginResponse {

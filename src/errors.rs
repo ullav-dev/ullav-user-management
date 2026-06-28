@@ -38,7 +38,15 @@ pub enum AppError {
 
     #[error("payment provider error: {0}")]
     PaymentProvider(String),
+
+    #[error("oauth2 error: {0}")]
+    OAuth2(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
 }
+
+pub type AppResult<T> = Result<T, AppError>;
 
 impl actix_web::ResponseError for AppError {
     fn status_code(&self) -> actix_web::http::StatusCode {
@@ -51,6 +59,7 @@ impl actix_web::ResponseError for AppError {
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::PaymentProvider(_) => StatusCode::BAD_GATEWAY,
+            AppError::OAuth2(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

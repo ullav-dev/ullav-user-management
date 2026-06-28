@@ -1,6 +1,6 @@
 use crate::errors::AppError;
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -103,6 +103,46 @@ pub fn create_jwt(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|e| AppError::Jwt(e.to_string()))
+}
+
+/// Create a signed RS256 JWT for the given user (fleet migration — replaces HS256).
+pub fn create_jwt_rs256(
+    user_id:       Uuid,
+    username:      String,
+    issuer:        &str,
+    ttl_hours:     i64,
+    roles:         Vec<String>,
+    permissions:   Vec<String>,
+    subscriptions: HashMap<String, SubscriptionClaim>,
+    teams:         HashMap<String, TeamClaim>,
+    key:           &crate::utils::rs256::RsaKeyPair,
+) -> Result<String, AppError> {
+    let now = Utc::now();
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iat: now.timestamp(),
+        exp: (now + Duration::hours(ttl_hours)).timestamp(),
+        username,
+        roles,
+        permissions,
+        subscriptions,
+        teams,
+    };
+
+    // Embed 'iss' alongside Claims via a thin wrapper so validators can check it.
+    #[derive(Serialize)]
+    struct WithIss<'a> {
+        iss: &'a str,
+        #[serde(flatten)]
+        inner: &'a Claims,
+    }
+
+    encode(
+        &key.jwt_header(),
+        &WithIss { iss: issuer, inner: &claims },
+        key.encoding_key(),
     )
     .map_err(|e| AppError::Jwt(e.to_string()))
 }

@@ -1,3 +1,5 @@
+pub mod oauth2;
+
 use crate::errors::AppError;
 use crate::models::{
     AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
@@ -44,6 +46,37 @@ pub async fn create_user(
         .await
         .map_err(|e| {
             // PostgreSQL unique-violation code is 23505
+            if let Some(db_err) = e.as_db_error() {
+                if db_err.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                    return AppError::Conflict;
+                }
+            }
+            AppError::Database(e)
+        })?;
+
+    Ok(row_to_user(&row))
+}
+
+/// Create a new user as immediately active (admin provisioning, no email confirmation).
+pub async fn admin_create_user(
+    pool: &Pool,
+    email: &str,
+    username: &str,
+    password_hash: &str,
+    first_name: Option<&str>,
+    last_name: Option<&str>,
+) -> Result<User, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "INSERT INTO users (email, username, password_hash, is_active, first_name, last_name)
+             VALUES ($1, $2, $3, TRUE, $4, $5)
+             RETURNING id, email, username, password_hash, is_active, first_name, last_name,
+                       avatar_url, created_at, updated_at, confirmation_token, confirmation_token_expires_at",
+            &[&email, &username, &password_hash, &first_name, &last_name],
+        )
+        .await
+        .map_err(|e| {
             if let Some(db_err) = e.as_db_error() {
                 if db_err.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
                     return AppError::Conflict;

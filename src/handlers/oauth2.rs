@@ -1,0 +1,857 @@
+//! OAuth2 Authorization Server endpoints.
+//!
+//! Implements:
+//! - RFC 6749  — OAuth 2.0
+//! - RFC 7636  — PKCE (S256 only)
+//! - RFC 7591  — Dynamic Client Registration
+//! - RFC 7009  — Token Revocation
+//! - RFC 8414  — Authorization Server Metadata
+//! - RFC 8707  — Resource Indicators (audience binding)
+//! - draft-ietf-oauth-client-id-metadata-document — CIMD (for Claude Desktop/Code)
+
+use crate::{
+    db,
+    errors::AppError,
+    AppState,
+};
+use actix_web::{
+    cookie::{Cookie, SameSite},
+    get, post,
+    web::{self, Form, Json, Query},
+    HttpRequest, HttpResponse,
+};
+use base64ct::{Base64UrlUnpadded, Encoding};
+use chrono::{Duration, Utc};
+use jsonwebtoken::encode;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use url::Url;
+use uuid::Uuid;
+
+// ── Config constants ──────────────────────────────────────────────────────────
+
+const AUTH_CODE_TTL_MINUTES: i64 = 10;
+const ACCESS_TOKEN_TTL_SECONDS: i64 = 3600;
+const REFRESH_TOKEN_TTL_DAYS: i64 = 30;
+const SESSION_TTL_DAYS: i64 = 30;
+const SESSION_COOKIE_NAME: &str = "ullav_session";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn secure_hex_token(byte_len: usize) -> String {
+    let mut buf = vec![0u8; byte_len];
+    rand::rng().fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+fn sha256_hex(data: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(data.as_bytes());
+    hex::encode(h.finalize())
+}
+
+fn session_token_from_req(req: &HttpRequest) -> Option<String> {
+    req.cookie(SESSION_COOKIE_NAME).map(|c| c.value().to_owned())
+}
+
+fn make_session_cookie(raw: &str) -> Cookie<'static> {
+    Cookie::build(SESSION_COOKIE_NAME, raw.to_owned())
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(actix_web::cookie::time::Duration::days(SESSION_TTL_DAYS))
+        .finish()
+}
+
+/// RFC 8252 §7.3 loopback redirect URI matching.
+///
+/// `pub(crate)` so unit tests in `src/tests.rs` can call it directly.
+///
+/// For `http://localhost` and `http://127.0.0.1` URIs, the port is ignored and
+/// only the path is compared.  All other URIs require an exact string match.
+pub(crate) fn redirect_uri_allowed(client_uris: &[String], requested: &str) -> bool {
+    let Ok(req_url) = Url::parse(requested) else { return false; };
+    let is_loopback = req_url.scheme() == "http"
+        && matches!(req_url.host_str(), Some("localhost") | Some("127.0.0.1"));
+
+    for registered in client_uris {
+        if is_loopback {
+            let Ok(reg_url) = Url::parse(registered) else { continue };
+            let reg_is_loopback = reg_url.scheme() == "http"
+                && matches!(reg_url.host_str(), Some("localhost") | Some("127.0.0.1"));
+            if reg_is_loopback && reg_url.path() == req_url.path() {
+                return true;
+            }
+        } else if req_url.scheme() == "https" && registered == requested {
+            return true;
+        }
+    }
+    false
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+     .replace('<', "&lt;")
+     .replace('>', "&gt;")
+     .replace('"', "&quot;")
+     .replace('\'', "&#x27;")
+}
+
+// ── OAuth2 RS256 JWT claims ───────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct OAuth2Claims {
+    iss: String,
+    sub: String,
+    aud: String,
+    iat: i64,
+    exp: i64,
+    scope: String,
+    client_id: String,
+    username: String,
+}
+
+async fn mint_access_token(
+    state: &AppState,
+    user_id: Uuid,
+    username: &str,
+    scope: &str,
+    resource: &str,
+    client_id: &str,
+) -> Result<String, AppError> {
+    let now = Utc::now();
+    let claims = OAuth2Claims {
+        iss: state.oauth2_issuer.clone(),
+        sub: user_id.to_string(),
+        aud: resource.to_owned(),
+        iat: now.timestamp(),
+        exp: (now + Duration::seconds(ACCESS_TOKEN_TTL_SECONDS)).timestamp(),
+        scope: scope.to_owned(),
+        client_id: client_id.to_owned(),
+        username: username.to_owned(),
+    };
+    let keys = state.oauth2_keys.read().await;
+    let signing_key = keys.primary_key();
+    encode(&signing_key.jwt_header(), &claims, signing_key.encoding_key())
+        .map_err(|e| AppError::Jwt(e.to_string()))
+}
+
+fn token_json_response(access_token: &str, scope: &str, refresh_token: Option<&str>) -> HttpResponse {
+    let mut body = serde_json::json!({
+        "access_token": access_token,
+        "token_type":   "Bearer",
+        "expires_in":   ACCESS_TOKEN_TTL_SECONDS,
+        "scope":        scope,
+    });
+    if let Some(rt) = refresh_token {
+        body["refresh_token"] = serde_json::Value::String(rt.to_owned());
+    }
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .append_header(("Cache-Control", "no-store"))
+        .json(body)
+}
+
+// ── JWKS ──────────────────────────────────────────────────────────────────────
+
+/// `GET /oauth2/jwks` — Public JWKS document (unauthenticated).
+#[get("/oauth2/jwks")]
+pub async fn jwks(state: web::Data<AppState>) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(state.oauth2_keys.read().await.jwks())
+}
+
+// ── AS Metadata (RFC 8414) ────────────────────────────────────────────────────
+
+/// `GET /.well-known/oauth-authorization-server`
+#[get("/.well-known/oauth-authorization-server")]
+pub async fn as_metadata(state: web::Data<AppState>) -> HttpResponse {
+    let iss = &state.oauth2_issuer;
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(serde_json::json!({
+            "issuer":                                iss,
+            "authorization_endpoint":                format!("{iss}/oauth2/authorize"),
+            "token_endpoint":                        format!("{iss}/oauth2/token"),
+            "jwks_uri":                              format!("{iss}/oauth2/jwks"),
+            "registration_endpoint":                 format!("{iss}/oauth2/register"),
+            "revocation_endpoint":                   format!("{iss}/oauth2/revoke"),
+            "response_types_supported":              ["code"],
+            "grant_types_supported":                 ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported":      ["S256"],
+            "token_endpoint_auth_methods_supported": ["none"],
+            "scopes_supported":                      ["mcp:tools"],
+            "subject_types_supported":               ["public"],
+        }))
+}
+
+// ── Dynamic Client Registration (RFC 7591 + CIMD) ────────────────────────────
+
+#[derive(Deserialize)]
+pub struct DcrRequest {
+    /// Optional: if this is a CIMD URL, the AS fetches the metadata from it.
+    client_id: Option<String>,
+    client_name: Option<String>,
+    redirect_uris: Option<Vec<String>>,
+    scope: Option<String>,
+    #[serde(flatten)]
+    _extra: HashMap<String, serde_json::Value>,
+}
+
+/// `POST /oauth2/register` — Dynamic Client Registration.
+///
+/// Supports both classic DCR (client supplies name + redirect_uris) and
+/// Client ID Metadata Documents (CIMD) where `client_id` is a URL the AS
+/// fetches to discover the client's metadata.  Public clients only.
+#[post("/oauth2/register")]
+pub async fn register(
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+    body: Json<DcrRequest>,
+) -> Result<HttpResponse, AppError> {
+    let ip = req
+        .connection_info()
+        .realip_remote_addr()
+        .unwrap_or("unknown")
+        .to_owned();
+    if !state.register_rate_limiter.check(&ip) {
+        return Err(AppError::OAuth2("rate limit exceeded — try again later".into()));
+    }
+
+    let (client_id, client_name, redirect_uris) =
+        resolve_client_metadata(&state, &body).await?;
+
+    // Validate redirect URIs.
+    for uri in &redirect_uris {
+        let Ok(parsed) = Url::parse(uri) else {
+            return Err(AppError::Validation(format!("invalid redirect_uri: {uri}")));
+        };
+        let is_loopback_http = parsed.scheme() == "http"
+            && matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1"));
+        if parsed.scheme() != "https" && !is_loopback_http {
+            return Err(AppError::Validation(format!(
+                "redirect_uri must use https or loopback http: {uri}"
+            )));
+        }
+    }
+
+    let allowed_scopes = vec!["mcp:tools".to_owned()];
+    let granted_scopes: Vec<String> = body.scope
+        .as_deref()
+        .unwrap_or("mcp:tools")
+        .split_whitespace()
+        .filter(|s| allowed_scopes.contains(&s.to_string()))
+        .map(str::to_owned)
+        .collect();
+
+    let client = db::oauth2::register_oauth2_client(
+        &state.pool,
+        &client_id,
+        &client_name,
+        &redirect_uris,
+        &granted_scopes,
+        None,
+    )
+    .await?;
+
+    db::oauth2::audit_log(
+        &state.pool, "register", None, Some(&client.client_id),
+        Some(&client.allowed_scopes.join(" ")), None, Some(&ip), None,
+    ).await;
+
+    Ok(HttpResponse::Created().json(serde_json::json!({
+        "client_id":                  client.client_id,
+        "client_name":                client.client_name,
+        "redirect_uris":              client.redirect_uris,
+        "scope":                      client.allowed_scopes.join(" "),
+        "token_endpoint_auth_method": "none",
+        "grant_types":                ["authorization_code", "refresh_token"],
+        "response_types":             ["code"],
+        "code_challenge_method":      "S256",
+    })))
+}
+
+/// Resolve the client_id, client_name, and redirect_uris for a DCR request.
+///
+/// If `client_id` is a URL, fetches the CIMD document from it and extracts
+/// the metadata.  Otherwise uses the fields from the request body directly.
+async fn resolve_client_metadata(
+    state: &AppState,
+    body: &DcrRequest,
+) -> Result<(String, String, Vec<String>), AppError> {
+    if let Some(ref cid) = body.client_id {
+        if cid.starts_with("https://") {
+            // CIMD: fetch the client metadata document from the client_id URL.
+            let cimd: serde_json::Value = state
+                .http_client
+                .get(cid)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|e| AppError::Validation(format!("failed to fetch CIMD from {cid}: {e}")))?
+                .json()
+                .await
+                .map_err(|e| AppError::Validation(format!("CIMD response not valid JSON: {e}")))?;
+
+            let redirect_uris: Vec<String> = cimd["redirect_uris"]
+                .as_array()
+                .ok_or_else(|| AppError::Validation("CIMD missing redirect_uris".into()))?
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            let client_name = cimd["client_name"]
+                .as_str()
+                .unwrap_or("Unknown")
+                .to_owned();
+
+            return Ok((cid.clone(), client_name, redirect_uris));
+        }
+    }
+
+    // Classic DCR.
+    let redirect_uris = body.redirect_uris.clone().ok_or_else(|| {
+        AppError::Validation("redirect_uris required".into())
+    })?;
+    if redirect_uris.is_empty() {
+        return Err(AppError::Validation("redirect_uris must not be empty".into()));
+    }
+    let client_id = format!("dcr-{}", secure_hex_token(12));
+    let client_name = body.client_name.clone().unwrap_or_else(|| "Unnamed client".into());
+
+    Ok((client_id, client_name, redirect_uris))
+}
+
+// ── Authorization endpoint ────────────────────────────────────────────────────
+
+#[derive(Deserialize, Clone)]
+pub struct AuthorizeParams {
+    pub response_type: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    /// RFC 8707 resource indicator.
+    pub resource: String,
+}
+
+/// `GET /oauth2/authorize` — Begin the authorization code flow.
+#[get("/oauth2/authorize")]
+pub async fn authorize_get(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    query: Query<AuthorizeParams>,
+) -> Result<HttpResponse, AppError> {
+    validate_authorize_params(&query)?;
+
+    let client = db::oauth2::get_oauth2_client(&state.pool, &query.client_id)
+        .await
+        .map_err(|_| AppError::Validation("unknown client_id".into()))?;
+
+    if !redirect_uri_allowed(&client.redirect_uris, &query.redirect_uri) {
+        return Err(AppError::Validation("redirect_uri not registered for this client".into()));
+    }
+
+    if let Some(session_token) = session_token_from_req(&req) {
+        let hash = sha256_hex(&session_token);
+        if let Ok(session) = db::oauth2::get_user_session(&state.pool, &hash).await {
+            if client.first_party {
+                let url = build_code_redirect(&state, session.user_id, &query).await?;
+                return Ok(HttpResponse::Found()
+                    .append_header(("Location", url.as_str()))
+                    .finish());
+            } else {
+                let user = db::get_user_by_id(&state.pool, session.user_id).await?;
+                return Ok(HttpResponse::Ok()
+                    .content_type("text/html; charset=utf-8")
+                    .body(consent_html(&query, &user.username, &client.client_name)));
+            }
+        }
+    }
+
+    Ok(HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(login_html(&query, None)))
+}
+
+#[derive(Deserialize)]
+pub struct AuthorizeForm {
+    // Login fields
+    email: Option<String>,
+    password: Option<String>,
+    // Consent decision ("approve" | "deny")
+    action: Option<String>,
+    // OAuth2 params forwarded as hidden fields
+    response_type: Option<String>,
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    scope: Option<String>,
+    state: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    resource: Option<String>,
+}
+
+/// `POST /oauth2/authorize` — Process a login form or consent decision.
+#[post("/oauth2/authorize")]
+pub async fn authorize_post(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    form: Form<AuthorizeForm>,
+) -> Result<HttpResponse, AppError> {
+    let params = AuthorizeParams {
+        response_type: form.response_type.clone().unwrap_or_default(),
+        client_id: form.client_id.clone().unwrap_or_default(),
+        redirect_uri: form.redirect_uri.clone().unwrap_or_default(),
+        scope: form.scope.clone(),
+        state: form.state.clone(),
+        code_challenge: form.code_challenge.clone().unwrap_or_default(),
+        code_challenge_method: form.code_challenge_method.clone().unwrap_or_default(),
+        resource: form.resource.clone().unwrap_or_default(),
+    };
+
+    let client = db::oauth2::get_oauth2_client(&state.pool, &params.client_id)
+        .await
+        .map_err(|_| AppError::Validation("unknown client_id".into()))?;
+
+    if !redirect_uri_allowed(&client.redirect_uris, &params.redirect_uri) {
+        return Err(AppError::Validation("redirect_uri not registered for this client".into()));
+    }
+
+    // Handle a consent decision (user was already logged in via session cookie).
+    if let Some(ref action) = form.action {
+        if let Some(session_token) = session_token_from_req(&req) {
+            let hash = sha256_hex(&session_token);
+            if let Ok(session) = db::oauth2::get_user_session(&state.pool, &hash).await {
+                return match action.as_str() {
+                    "approve" => {
+                        let url = build_code_redirect(&state, session.user_id, &params).await?;
+                        Ok(HttpResponse::Found()
+                            .append_header(("Location", url.as_str()))
+                            .finish())
+                    }
+                    _ => {
+                        let url = error_redirect(&params.redirect_uri, "access_denied", params.state.as_deref());
+                        Ok(HttpResponse::Found()
+                            .append_header(("Location", url.as_str()))
+                            .finish())
+                    }
+                };
+            }
+        }
+        // Session expired during consent page — show login form again.
+        return Ok(HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(login_html(&params, Some("Your session expired. Please sign in again."))));
+    }
+
+    // Process login form submission.
+    let email = form.email.as_deref().unwrap_or("").trim().to_lowercase();
+    let password = form.password.as_deref().unwrap_or("");
+
+    let user = match db::get_user_by_email(&state.pool, &email).await {
+        Ok(u) if u.is_active => u,
+        _ => {
+            return Ok(HttpResponse::Ok()
+                .content_type("text/html; charset=utf-8")
+                .body(login_html(&params, Some("Invalid email or password."))));
+        }
+    };
+
+    match crate::utils::password::verify_password(password, &user.password_hash) {
+        Ok(true) => {}
+        _ => {
+            return Ok(HttpResponse::Ok()
+                .content_type("text/html; charset=utf-8")
+                .body(login_html(&params, Some("Invalid email or password."))));
+        }
+    }
+
+    // Credentials valid — create a browser session.
+    let raw_token = secure_hex_token(32);
+    let token_hash = sha256_hex(&raw_token);
+    db::oauth2::create_user_session(&state.pool, &token_hash, user.id, SESSION_TTL_DAYS).await?;
+    let cookie = make_session_cookie(&raw_token);
+
+    if client.first_party {
+        let url = build_code_redirect(&state, user.id, &params).await?;
+        Ok(HttpResponse::Found()
+            .cookie(cookie)
+            .append_header(("Location", url.as_str()))
+            .finish())
+    } else {
+        Ok(HttpResponse::Ok()
+            .cookie(cookie)
+            .content_type("text/html; charset=utf-8")
+            .body(consent_html(&params, &user.username, &client.client_name)))
+    }
+}
+
+// ── Token endpoint ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct TokenForm {
+    grant_type: String,
+    code: Option<String>,
+    redirect_uri: Option<String>,
+    client_id: Option<String>,
+    code_verifier: Option<String>,
+    refresh_token: Option<String>,
+}
+
+/// `POST /oauth2/token` — Exchange auth code or refresh token for an access token.
+#[post("/oauth2/token")]
+pub async fn token(
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+    form: Form<TokenForm>,
+) -> Result<HttpResponse, AppError> {
+    let ip = req
+        .connection_info()
+        .realip_remote_addr()
+        .unwrap_or("unknown")
+        .to_owned();
+    if !state.token_rate_limiter.check(&ip) {
+        return Err(AppError::OAuth2("rate limit exceeded — try again later".into()));
+    }
+    match form.grant_type.as_str() {
+        "authorization_code" => auth_code_grant(&state, &form, &ip).await,
+        "refresh_token"      => refresh_token_grant(&state, &form, &ip).await,
+        gt => Err(AppError::Validation(format!("unsupported grant_type: {gt}"))),
+    }
+}
+
+async fn auth_code_grant(state: &AppState, form: &TokenForm, ip: &str) -> Result<HttpResponse, AppError> {
+    let code = form.code.as_deref()
+        .ok_or_else(|| AppError::Validation("code required".into()))?;
+    let redirect_uri = form.redirect_uri.as_deref()
+        .ok_or_else(|| AppError::Validation("redirect_uri required".into()))?;
+    let client_id = form.client_id.as_deref()
+        .ok_or_else(|| AppError::Validation("client_id required".into()))?;
+    let verifier = form.code_verifier.as_deref()
+        .ok_or_else(|| AppError::Validation("code_verifier required".into()))?;
+
+    let auth_code = db::oauth2::consume_auth_code(&state.pool, code).await?;
+
+    if auth_code.client_id != client_id {
+        return Err(AppError::InvalidToken);
+    }
+
+    // RFC 6749 §4.1.3: redirect_uri in the token request must match the one used
+    // in the authorization request (stored in the auth code), not just the registered set.
+    // Use port-agnostic matching for loopback URIs per RFC 8252 §7.3.
+    if !redirect_uri_allowed(&[auth_code.redirect_uri.clone()], redirect_uri) {
+        return Err(AppError::Validation(
+            "redirect_uri does not match the one used in the authorization request".into(),
+        ));
+    }
+
+    // PKCE S256 verification (RFC 7636 §4.6).
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let computed = Base64UrlUnpadded::encode_string(&hasher.finalize());
+    if computed != auth_code.code_challenge {
+        return Err(AppError::InvalidToken);
+    }
+
+    let user = db::get_user_by_id(&state.pool, auth_code.user_id).await?;
+    let access_token = mint_access_token(
+        state, user.id, &user.username, &auth_code.scope, &auth_code.resource, client_id,
+    ).await?;
+
+    let refresh_raw = secure_hex_token(32);
+    let refresh_hash = sha256_hex(&refresh_raw);
+    db::oauth2::create_refresh_token(
+        &state.pool, &refresh_hash, client_id, user.id,
+        &auth_code.scope, &auth_code.resource, REFRESH_TOKEN_TTL_DAYS,
+    ).await?;
+
+    db::oauth2::audit_log(
+        &state.pool, "token_issued", Some(user.id), Some(client_id),
+        Some(&auth_code.scope), Some(&auth_code.resource), Some(ip), None,
+    ).await;
+
+    Ok(token_json_response(&access_token, &auth_code.scope, Some(&refresh_raw)))
+}
+
+async fn refresh_token_grant(state: &AppState, form: &TokenForm, ip: &str) -> Result<HttpResponse, AppError> {
+    let raw = form.refresh_token.as_deref()
+        .ok_or_else(|| AppError::Validation("refresh_token required".into()))?;
+    let client_id = form.client_id.as_deref()
+        .ok_or_else(|| AppError::Validation("client_id required".into()))?;
+
+    let old = db::oauth2::rotate_refresh_token(&state.pool, &sha256_hex(raw)).await?;
+    if old.client_id != client_id {
+        return Err(AppError::InvalidToken);
+    }
+
+    let user = db::get_user_by_id(&state.pool, old.user_id).await?;
+    let access_token = mint_access_token(
+        state, user.id, &user.username, &old.scope, &old.resource, client_id,
+    ).await?;
+
+    let new_refresh_raw = secure_hex_token(32);
+    let new_refresh_hash = sha256_hex(&new_refresh_raw);
+    db::oauth2::create_refresh_token(
+        &state.pool, &new_refresh_hash, client_id, user.id,
+        &old.scope, &old.resource, REFRESH_TOKEN_TTL_DAYS,
+    ).await?;
+
+    db::oauth2::audit_log(
+        &state.pool, "token_refreshed", Some(user.id), Some(client_id),
+        Some(&old.scope), Some(&old.resource), Some(ip), None,
+    ).await;
+
+    Ok(token_json_response(&access_token, &old.scope, Some(&new_refresh_raw)))
+}
+
+// ── Revocation (RFC 7009) ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct RevokeForm {
+    token: String,
+    #[serde(rename = "token_type_hint")]
+    _hint: Option<String>,
+}
+
+/// `POST /oauth2/revoke` — Revoke a refresh token.
+///
+/// Always returns 200 per RFC 7009, even if the token is unknown.
+#[post("/oauth2/revoke")]
+pub async fn revoke(
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+    form: Form<RevokeForm>,
+) -> HttpResponse {
+    let revoked = db::oauth2::revoke_refresh_token(&state.pool, &sha256_hex(&form.token))
+        .await
+        .is_ok();
+    if revoked {
+        let ip = req
+            .connection_info()
+            .realip_remote_addr()
+            .unwrap_or("unknown")
+            .to_owned();
+        db::oauth2::audit_log(
+            &state.pool, "token_revoked", None, None, None, None, Some(&ip), None,
+        ).await;
+    }
+    HttpResponse::Ok().finish()
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn validate_authorize_params(p: &AuthorizeParams) -> Result<(), AppError> {
+    if p.response_type != "code" {
+        return Err(AppError::Validation("response_type must be 'code'".into()));
+    }
+    if p.code_challenge_method != "S256" {
+        return Err(AppError::Validation("code_challenge_method must be 'S256'".into()));
+    }
+    if p.code_challenge.is_empty() {
+        return Err(AppError::Validation("code_challenge is required".into()));
+    }
+    if p.resource.is_empty() {
+        return Err(AppError::Validation("resource is required (RFC 8707)".into()));
+    }
+    Ok(())
+}
+
+async fn build_code_redirect(
+    state: &web::Data<AppState>,
+    user_id: Uuid,
+    params: &AuthorizeParams,
+) -> Result<Url, AppError> {
+    let scope = params.scope.as_deref().unwrap_or("mcp:tools");
+    let code = secure_hex_token(32);
+
+    db::oauth2::create_auth_code(
+        &state.pool, &code, &params.client_id, user_id,
+        &params.redirect_uri, scope, &params.resource, &params.code_challenge,
+        AUTH_CODE_TTL_MINUTES,
+    ).await?;
+
+    let mut url = Url::parse(&params.redirect_uri)
+        .map_err(|_| AppError::Validation("invalid redirect_uri".into()))?;
+    url.query_pairs_mut().append_pair("code", &code);
+    if let Some(ref s) = params.state {
+        url.query_pairs_mut().append_pair("state", s);
+    }
+    Ok(url)
+}
+
+fn error_redirect(redirect_uri: &str, error: &str, state: Option<&str>) -> Url {
+    let mut url = Url::parse(redirect_uri)
+        .unwrap_or_else(|_| Url::parse("about:blank").unwrap());
+    url.query_pairs_mut().append_pair("error", error);
+    if let Some(s) = state {
+        url.query_pairs_mut().append_pair("state", s);
+    }
+    url
+}
+
+// ── HTML views ────────────────────────────────────────────────────────────────
+
+fn hidden_oauth2_fields(p: &AuthorizeParams) -> String {
+    format!(
+        r#"<input type="hidden" name="response_type" value="{response_type}">
+<input type="hidden" name="client_id" value="{client_id}">
+<input type="hidden" name="redirect_uri" value="{redirect_uri}">
+<input type="hidden" name="scope" value="{scope}">
+<input type="hidden" name="state" value="{state}">
+<input type="hidden" name="code_challenge" value="{challenge}">
+<input type="hidden" name="code_challenge_method" value="{method}">
+<input type="hidden" name="resource" value="{resource}">"#,
+        response_type = html_escape(&p.response_type),
+        client_id     = html_escape(&p.client_id),
+        redirect_uri  = html_escape(&p.redirect_uri),
+        scope         = html_escape(p.scope.as_deref().unwrap_or("")),
+        state         = html_escape(p.state.as_deref().unwrap_or("")),
+        challenge     = html_escape(&p.code_challenge),
+        method        = html_escape(&p.code_challenge_method),
+        resource      = html_escape(&p.resource),
+    )
+}
+
+fn login_html(params: &AuthorizeParams, error: Option<&str>) -> String {
+    let error_html = error.map_or_else(String::new, |e| {
+        format!(r#"<div class="err">{}</div>"#, html_escape(e))
+    });
+    let hidden = hidden_oauth2_fields(params);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ullav — Sign in</title>
+  <style>
+    *,*::before,*::after{{box-sizing:border-box}}
+    body{{font-family:system-ui,sans-serif;background:#f8f8f6;
+          display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}
+    .card{{background:#fff;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.08);
+           padding:2rem;width:100%;max-width:400px}}
+    h1{{margin:0 0 1.5rem;font-size:1.4rem;color:#1a1a1a}}
+    label{{display:block;font-size:.875rem;color:#444;margin-bottom:.25rem}}
+    input[type=email],input[type=password]{{display:block;width:100%;padding:.6rem .75rem;
+      border:1px solid #d0d0d0;border-radius:4px;font-size:1rem;margin-bottom:1rem}}
+    button{{width:100%;padding:.7rem;background:#2563eb;color:#fff;border:none;
+            border-radius:4px;font-size:1rem;cursor:pointer}}
+    button:hover{{background:#1d4ed8}}
+    .err{{background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
+          border-radius:4px;padding:.6rem .75rem;margin-bottom:1rem;font-size:.875rem}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Sign in to Ullav</h1>
+    {error_html}
+    <form method="post" action="/oauth2/authorize">
+      {hidden}
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" autocomplete="email" required autofocus>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>"#
+    )
+}
+
+fn scope_description(scope: &str) -> &'static str {
+    match scope {
+        "cunav"         => "View and manage your Cunav support tickets",
+        "cunav:support" => "Manage support tickets as a support team member",
+        "cunav:read"    => "View your Cunav support tickets (read-only)",
+        "obair"         => "Access your AWE workflows and execution history",
+        "clann"         => "View and edit your Clann family tree data",
+        "dam"           => "Access your DAM digital assets",
+        "mcp:tools"     => "Use AI-assisted tools on your behalf",
+        _               => "Additional access",
+    }
+}
+
+fn consent_html(params: &AuthorizeParams, username: &str, client_name: &str) -> String {
+    let scope_str = params.scope.as_deref().unwrap_or("mcp:tools");
+    let hidden = hidden_oauth2_fields(params);
+
+    // Build a list of human-readable scope descriptions.
+    let scope_items: String = scope_str
+        .split_whitespace()
+        .map(|s| {
+            format!(
+                r#"<li><span class="scope-label">{}</span><span class="scope-desc">{}</span></li>"#,
+                html_escape(s),
+                scope_description(s),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n      ");
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ullav — Authorise {client_name_esc}</title>
+  <style>
+    *,*::before,*::after{{box-sizing:border-box}}
+    body{{font-family:system-ui,sans-serif;background:#f8f8f6;
+          display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}
+    .card{{background:#fff;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.08);
+           padding:2rem;width:100%;max-width:460px}}
+    h1{{margin:0 0 .25rem;font-size:1.25rem;color:#111}}
+    .sub{{color:#666;font-size:.9rem;margin:0 0 1.5rem}}
+    .scope-list{{list-style:none;padding:0;margin:0 0 1.5rem;
+                 border:1px solid #e5e7eb;border-radius:6px;overflow:hidden}}
+    .scope-list li{{padding:.65rem .9rem;border-bottom:1px solid #e5e7eb;display:flex;
+                    flex-direction:column;gap:.15rem}}
+    .scope-list li:last-child{{border-bottom:none}}
+    .scope-label{{font-size:.75rem;font-weight:600;color:#6b7280;text-transform:uppercase;
+                  letter-spacing:.04em}}
+    .scope-desc{{font-size:.9rem;color:#111}}
+    .actions{{display:flex;gap:.75rem}}
+    button{{flex:1;padding:.7rem;border:none;border-radius:4px;font-size:1rem;cursor:pointer;
+            font-weight:500}}
+    .approve{{background:#2563eb;color:#fff}}
+    .approve:hover{{background:#1d4ed8}}
+    .deny{{background:#e5e7eb;color:#374151}}
+    .deny:hover{{background:#d1d5db}}
+    .footer{{margin-top:1.25rem;font-size:.78rem;color:#9ca3af;text-align:center}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Authorise {client_name_esc}</h1>
+    <p class="sub">Signed in as <strong>{username_esc}</strong></p>
+    <p style="color:#444;margin:0 0 .75rem;font-size:.9rem">
+      <strong>{client_name_esc}</strong> is requesting access to:
+    </p>
+    <ul class="scope-list">
+      {scope_items}
+    </ul>
+    <form method="post" action="/oauth2/authorize">
+      {hidden}
+      <div class="actions">
+        <button class="deny"    type="submit" name="action" value="deny">Deny</button>
+        <button class="approve" type="submit" name="action" value="approve">Allow</button>
+      </div>
+    </form>
+    <p class="footer">
+      You can revoke access at any time from your Ullav account settings.
+    </p>
+  </div>
+</body>
+</html>"#,
+        client_name_esc = html_escape(client_name),
+        username_esc    = html_escape(username),
+        scope_items     = scope_items,
+    )
+}

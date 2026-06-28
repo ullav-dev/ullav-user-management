@@ -212,6 +212,16 @@ pub struct UpdateProfileRequest {
     pub avatar_url: Option<Option<String>>,
 }
 
+/// Request body for `POST /admin/users` — create a pre-confirmed, active user.
+#[derive(Debug, Deserialize)]
+pub struct AdminCreateUserRequest {
+    pub email: String,
+    pub username: String,
+    pub password: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+}
+
 /// Request body for creating a new user.
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {

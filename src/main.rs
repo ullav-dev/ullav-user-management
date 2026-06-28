@@ -4,25 +4,13 @@ use deadpool_postgres::{Config as PoolConfig, Runtime};
 use dotenv::dotenv;
 use lettre::{AsyncSmtpTransport, Tokio1Executor};
 use std::{collections::HashSet, env, net::IpAddr, sync::Arc};
+use tokio::sync::RwLock;
 use tokio_postgres::NoTls;
+use utils::key_store::KeyStore;
+use utils::rate_limit::RateLimiter;
 
-/// Resolve a secret value, preferring the Docker-secrets `_FILE` convention.
-///
-/// If `{name}_FILE` is set, the file at that path is read and its contents
-/// trimmed (Docker writes a trailing newline). Falls back to the plain `{name}`
-/// env var. Returns `None` when neither is present.
-fn resolve_secret(name: &str) -> Option<String> {
-    let file_key = format!("{}_FILE", name);
-    if let Ok(path) = env::var(&file_key) {
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => return Some(contents.trim().to_string()),
-            Err(e) => log::warn!(
-                "{} points to {:?} but the file could not be read: {} — falling back to {}",
-                file_key, path, e, name
-            ),
-        }
-    }
-    env::var(name).ok()
+pub(crate) fn resolve_secret(name: &str) -> Option<String> {
+    utils::resolve_secret(name)
 }
 
 mod config;
@@ -63,6 +51,18 @@ pub struct AppState {
     pub paypal: Option<config::PayPalConfig>,
     /// Base URL of the Clann app — used to build checkout return/cancel URLs.
     pub clann_app_url: String,
+    /// RS256 signing keys. Wrapped in Arc<RwLock> so admin key-rotation handlers can
+    /// update the in-memory store immediately without a restart.
+    pub oauth2_keys: Arc<RwLock<KeyStore>>,
+    /// Key Encryption Key (AES-256-GCM) for encrypting RSA private key PEMs in DB.
+    /// `None` in single-key mode; required for the generate-key admin endpoint.
+    pub kek: Option<Arc<utils::key_encrypt::KeyEncryptionKey>>,
+    /// Issuer URL for OAuth2 tokens and AS metadata (`OAUTH2_ISSUER` env var).
+    pub oauth2_issuer: String,
+    /// Rate limiter for /oauth2/token: max 20 requests per IP per minute.
+    pub token_rate_limiter: RateLimiter,
+    /// Rate limiter for /oauth2/register: max 10 registrations per IP per hour.
+    pub register_rate_limiter: RateLimiter,
 }
 
 #[actix_web::main]
@@ -248,6 +248,27 @@ async fn main() -> std::io::Result<()> {
     let clann_app_url = env::var("CLANN_APP_URL")
         .unwrap_or_else(|_| "http://localhost:3000".into());
 
+    // OAuth2 — load RS256 signing key(s).
+    // If OAUTH2_KEY_ENCRYPTION_KEY is set, keys are loaded from the DB (DB-backed mode).
+    // Otherwise, the single OAUTH2_SIGNING_KEY env var is used (single-key mode).
+    let oauth2_keys = utils::key_store::init_key_store(&pool)
+        .await
+        .expect("Failed to initialise OAuth2 signing key store");
+    let oauth2_keys = Arc::new(RwLock::new(oauth2_keys));
+
+    let kek = env::var("OAUTH2_KEY_ENCRYPTION_KEY")
+        .ok()
+        .and_then(|b64| {
+            utils::key_encrypt::KeyEncryptionKey::from_base64(&b64)
+                .map(Arc::new)
+                .map_err(|e| { log::error!("Failed to load OAUTH2_KEY_ENCRYPTION_KEY: {e}"); e })
+                .ok()
+        });
+
+    let oauth2_issuer = env::var("OAUTH2_ISSUER")
+        .unwrap_or_else(|_| "http://localhost:8081".into());
+    log::info!("OAuth2 issuer: {}", oauth2_issuer);
+
     let http_client = reqwest::Client::new();
 
     let state = web::Data::new(AppState {
@@ -264,6 +285,11 @@ async fn main() -> std::io::Result<()> {
         stripe: stripe_config,
         paypal: paypal_config,
         clann_app_url,
+        oauth2_keys,
+        kek,
+        oauth2_issuer,
+        token_rate_limiter: RateLimiter::new(20, std::time::Duration::from_secs(60)),
+        register_rate_limiter: RateLimiter::new(10, std::time::Duration::from_secs(3600)),
     });
 
     log::info!("Starting server on {}:{}", host, port);
@@ -305,7 +331,15 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::auth::confirm_email)
             .service(handlers::auth::confirm_email_get)
             .service(handlers::auth::request_password_reset)
-            .service(handlers::auth::confirm_password_reset);
+            .service(handlers::auth::confirm_password_reset)
+            // OAuth2 Authorization Server — all unauthenticated (bootstraps auth)
+            .service(handlers::oauth2::as_metadata)
+            .service(handlers::oauth2::jwks)
+            .service(handlers::oauth2::register)
+            .service(handlers::oauth2::authorize_get)
+            .service(handlers::oauth2::authorize_post)
+            .service(handlers::oauth2::token)
+            .service(handlers::oauth2::revoke);
 
         if enable_docs {
             app = app
@@ -373,6 +407,7 @@ async fn main() -> std::io::Result<()> {
                             ))
                             // Users
                             .service(handlers::admin::list_users)
+                            .service(handlers::admin::create_user)
                             .service(handlers::admin::get_user)
                             .service(handlers::admin::update_user)
                             .service(handlers::admin::delete_user)
@@ -413,6 +448,18 @@ async fn main() -> std::io::Result<()> {
                             .service(handlers::admin::disable_team_product)
                             .service(handlers::admin::assign_member_product_role)
                             .service(handlers::admin::revoke_member_product_role),
+                    )
+                    // OAuth2 key management — requires `oauth2:manage` (separate from users:read)
+                    .service(
+                        web::scope("/admin/oauth2")
+                            .wrap(middleware::auth::AuthMiddleware::require(
+                                jwt_secret.clone(),
+                                "oauth2:manage",
+                            ))
+                            .service(handlers::admin::list_oauth2_keys)
+                            .service(handlers::admin::generate_oauth2_key)
+                            .service(handlers::admin::promote_oauth2_key)
+                            .service(handlers::admin::retire_oauth2_key),
                     ),
             )
             // Webhook endpoints — no auth, provider-signed payloads

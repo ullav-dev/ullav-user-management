@@ -354,6 +354,9 @@ pub struct AuthorizeParams {
     pub code_challenge_method: String,
     /// RFC 8707 resource indicator.
     pub resource: String,
+    /// OIDC `prompt` parameter. `"login"` forces re-authentication even when a
+    /// session cookie is present, allowing the user to sign in as a different account.
+    pub prompt: Option<String>,
 }
 
 /// `GET /oauth2/authorize` — Begin the authorization code flow.
@@ -376,14 +379,19 @@ pub async fn authorize_get(
     if let Some(session_token) = session_token_from_req(&req) {
         let hash = sha256_hex(&session_token);
         if let Ok(session) = db::oauth2::get_user_session(&state.pool, &hash).await {
-            if client.first_party {
-                let result = build_code_redirect(&state, session.user_id, &query).await;
-                return handle_code_redirect(result, &query.redirect_uri, query.state.as_deref());
-            } else {
-                let user = db::get_user_by_id(&state.pool, session.user_id).await?;
-                return Ok(HttpResponse::Ok()
-                    .content_type("text/html; charset=utf-8")
-                    .body(consent_html(&query, &user.username, &client.client_name)));
+            // prompt=login forces re-authentication; skip session reuse entirely.
+            if query.prompt.as_deref() != Some("login") {
+                if client.first_party {
+                    let user = db::get_user_by_id(&state.pool, session.user_id).await?;
+                    return Ok(HttpResponse::Ok()
+                        .content_type("text/html; charset=utf-8")
+                        .body(account_chooser_html(&query, &user.email)));
+                } else {
+                    let user = db::get_user_by_id(&state.pool, session.user_id).await?;
+                    return Ok(HttpResponse::Ok()
+                        .content_type("text/html; charset=utf-8")
+                        .body(consent_html(&query, &user.username, &client.client_name)));
+                }
             }
         }
     }
@@ -427,6 +435,7 @@ pub async fn authorize_post(
         code_challenge: form.code_challenge.clone().unwrap_or_default(),
         code_challenge_method: form.code_challenge_method.clone().unwrap_or_default(),
         resource: form.resource.clone().unwrap_or_default(),
+        prompt: None,
     };
 
     let client = db::oauth2::get_oauth2_client(&state.pool, &params.client_id)
@@ -443,7 +452,7 @@ pub async fn authorize_post(
             let hash = sha256_hex(&session_token);
             if let Ok(session) = db::oauth2::get_user_session(&state.pool, &hash).await {
                 return match action.as_str() {
-                    "approve" => {
+                    "approve" | "continue" => {
                         let result = build_code_redirect(&state, session.user_id, &params).await;
                         handle_code_redirect(result, &params.redirect_uri, params.state.as_deref())
                     }
@@ -787,6 +796,68 @@ fn hidden_oauth2_fields(p: &AuthorizeParams) -> String {
         challenge     = html_escape(&p.code_challenge),
         method        = html_escape(&p.code_challenge_method),
         resource      = html_escape(&p.resource),
+    )
+}
+
+/// Builds the authorize URL with `prompt=login` so the user can re-authenticate.
+fn switch_account_url(p: &AuthorizeParams) -> String {
+    let mut pairs = url::form_urlencoded::Serializer::new(String::new());
+    pairs.append_pair("response_type", &p.response_type);
+    pairs.append_pair("client_id", &p.client_id);
+    pairs.append_pair("redirect_uri", &p.redirect_uri);
+    pairs.append_pair("scope", p.scope.as_deref().unwrap_or(""));
+    pairs.append_pair("state", p.state.as_deref().unwrap_or(""));
+    pairs.append_pair("code_challenge", &p.code_challenge);
+    pairs.append_pair("code_challenge_method", &p.code_challenge_method);
+    pairs.append_pair("resource", &p.resource);
+    pairs.append_pair("prompt", "login");
+    format!("/oauth2/authorize?{}", pairs.finish())
+}
+
+/// Shown to first-party clients when a session already exists.
+/// Lets the user confirm they want to continue as the current account,
+/// or switch to a different one.
+fn account_chooser_html(params: &AuthorizeParams, email: &str) -> String {
+    let hidden = hidden_oauth2_fields(params);
+    let switch_url = switch_account_url(params);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ullav — Continue as {email_esc}</title>
+  <style>
+    *,*::before,*::after{{box-sizing:border-box}}
+    body{{font-family:system-ui,sans-serif;background:#f8f8f6;
+          display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}
+    .card{{background:#fff;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.08);
+           padding:2rem;width:100%;max-width:400px;text-align:center}}
+    h1{{margin:0 0 .5rem;font-size:1.3rem;color:#1a1a1a}}
+    .email{{font-size:1rem;color:#2563eb;font-weight:500;margin:0 0 1.75rem;
+            word-break:break-all}}
+    button{{width:100%;padding:.7rem;background:#2563eb;color:#fff;border:none;
+            border-radius:4px;font-size:1rem;cursor:pointer;font-weight:500}}
+    button:hover{{background:#1d4ed8}}
+    .switch{{display:block;margin-top:1.1rem;font-size:.875rem;color:#6b7280;
+             text-decoration:none}}
+    .switch:hover{{color:#374151;text-decoration:underline}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Continue as</h1>
+    <p class="email">{email_esc}</p>
+    <form method="post" action="/oauth2/authorize">
+      {hidden}
+      <button type="submit" name="action" value="continue" autofocus>Continue</button>
+    </form>
+    <a class="switch" href="{switch_url_esc}">Use a different account</a>
+  </div>
+</body>
+</html>"#,
+        email_esc     = html_escape(email),
+        switch_url_esc = html_escape(&switch_url),
     )
 }
 

@@ -255,6 +255,9 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to initialise OAuth2 signing key store");
     let oauth2_keys = Arc::new(RwLock::new(oauth2_keys));
+    // Keep a separate clone for the AuthMiddleware in the HttpServer closure —
+    // the original Arc is moved into AppState below.
+    let oauth2_keys_middleware = oauth2_keys.clone();
 
     let kek = env::var("OAUTH2_KEY_ENCRYPTION_KEY")
         .ok()
@@ -353,7 +356,7 @@ async fn main() -> std::io::Result<()> {
             // Per-route permission enforcement is handled by nested scopes with path prefixes.
             .service(
                 web::scope("")
-                    .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone()))
+                    .wrap(middleware::auth::AuthMiddleware::new(jwt_secret.clone(), oauth2_keys_middleware.clone()))
                     // Any authenticated user
                     .service(handlers::auth::refresh)
                     .service(handlers::auth::change_password)
@@ -394,6 +397,7 @@ async fn main() -> std::io::Result<()> {
                         web::scope("/health")
                             .wrap(middleware::auth::AuthMiddleware::require(
                                 jwt_secret.clone(),
+                                oauth2_keys_middleware.clone(),
                                 "health:read",
                             ))
                             .service(handlers::health::health_scoped),
@@ -403,6 +407,7 @@ async fn main() -> std::io::Result<()> {
                         web::scope("/admin")
                             .wrap(middleware::auth::AuthMiddleware::require(
                                 jwt_secret.clone(),
+                                oauth2_keys_middleware.clone(),
                                 "users:read",
                             ))
                             // Users
@@ -454,6 +459,7 @@ async fn main() -> std::io::Result<()> {
                         web::scope("/admin/oauth2")
                             .wrap(middleware::auth::AuthMiddleware::require(
                                 jwt_secret.clone(),
+                                oauth2_keys_middleware.clone(),
                                 "oauth2:manage",
                             ))
                             .service(handlers::admin::list_oauth2_keys)

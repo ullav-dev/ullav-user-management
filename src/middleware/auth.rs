@@ -1,4 +1,10 @@
-use crate::{errors::AppError, utils::jwt::{Claims, decode_jwt}};
+use crate::{
+    errors::AppError,
+    utils::{
+        jwt::{Claims, decode_jwt, decode_jwt_rs256},
+        key_store::KeyStore,
+    },
+};
 use actix_web::HttpRequest;
 use actix_web::{
     body::EitherBody,
@@ -6,6 +12,8 @@ use actix_web::{
     http::header,
     Error, HttpMessage, HttpResponse,
 };
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Extract the JWT [`Claims`] injected by [`AuthMiddleware`] from a handler's request.
 pub fn claims_from_req(req: &HttpRequest) -> Result<Claims, AppError> {
@@ -23,27 +31,34 @@ use std::{
 /// Actix-web middleware that validates a Bearer JWT and optionally checks
 /// for a specific permission claim.
 ///
+/// Tries RS256 validation first (using all active OAuth2 signing keys to support
+/// key rotation), then falls back to HS256 with `jwt_secret` for backward compat
+/// with any sessions issued before the RS256 migration.
+///
 /// On success, the decoded [`Claims`](crate::utils::jwt::Claims) are inserted
 /// into the request extensions so downstream handlers can access them via
 /// `req.extensions().get::<Claims>()`.
 pub struct AuthMiddleware {
     jwt_secret: String,
+    oauth2_keys: Arc<RwLock<KeyStore>>,
     required_permission: Option<String>,
 }
 
 impl AuthMiddleware {
     /// Require a valid JWT; no specific permission enforced.
-    pub fn new(jwt_secret: String) -> Self {
+    pub fn new(jwt_secret: String, oauth2_keys: Arc<RwLock<KeyStore>>) -> Self {
         Self {
             jwt_secret,
+            oauth2_keys,
             required_permission: None,
         }
     }
 
     /// Require a valid JWT **and** the specified permission in the claims.
-    pub fn require(jwt_secret: String, permission: &str) -> Self {
+    pub fn require(jwt_secret: String, oauth2_keys: Arc<RwLock<KeyStore>>, permission: &str) -> Self {
         Self {
             jwt_secret,
+            oauth2_keys,
             required_permission: Some(permission.to_string()),
         }
     }
@@ -65,6 +80,7 @@ where
         ready(Ok(AuthMiddlewareInner {
             service: Rc::new(service),
             jwt_secret: self.jwt_secret.clone(),
+            oauth2_keys: self.oauth2_keys.clone(),
             required_permission: self.required_permission.clone(),
         }))
     }
@@ -73,6 +89,7 @@ where
 pub struct AuthMiddlewareInner<S> {
     service: Rc<S>,
     jwt_secret: String,
+    oauth2_keys: Arc<RwLock<KeyStore>>,
     required_permission: Option<String>,
 }
 
@@ -91,6 +108,7 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let service = Rc::clone(&self.service);
         let jwt_secret = self.jwt_secret.clone();
+        let oauth2_keys = self.oauth2_keys.clone();
         let required_permission = self.required_permission.clone();
 
         // Extract the token before consuming `req`.
@@ -115,7 +133,16 @@ where
                 }
             };
 
-            match decode_jwt(&token, &jwt_secret) {
+            // Try RS256 first (tokens issued by the new OAuth2 login), then fall
+            // back to HS256 for any sessions issued before the RS256 migration.
+            let claims_result = {
+                let keys_snapshot = oauth2_keys.read().await.keys.clone();
+
+                decode_jwt_rs256(&token, &keys_snapshot)
+                    .or_else(|_| decode_jwt(&token, &jwt_secret))
+            };
+
+            match claims_result {
                 Ok(claims) => {
                     if let Some(perm) = &required_permission {
                         if !claims.permissions.contains(perm) {

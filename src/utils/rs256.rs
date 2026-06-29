@@ -1,5 +1,5 @@
 use base64ct::{Base64UrlUnpadded, Encoding};
-use jsonwebtoken::{EncodingKey, Header, Algorithm};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Algorithm};
 use rsa::{
     pkcs1::DecodeRsaPrivateKey,
     pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
@@ -87,6 +87,14 @@ impl RsaKeyPair {
 
     pub fn encoding_key(&self) -> &EncodingKey {
         &self.inner.encoding_key
+    }
+
+    /// Build a [`DecodingKey`] for validating RS256 tokens signed with this key pair.
+    pub fn decoding_key(&self) -> Result<DecodingKey, crate::errors::AppError> {
+        DecodingKey::from_rsa_components(&self.inner.pub_n, &self.inner.pub_e)
+            .map_err(|e| crate::errors::AppError::Internal(
+                format!("failed to build RS256 decoding key: {e}")
+            ))
     }
 
     /// A JWT `Header` with alg=RS256 and the correct kid.

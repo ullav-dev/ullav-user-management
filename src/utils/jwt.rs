@@ -157,3 +157,21 @@ pub fn decode_jwt(token: &str, secret: &str) -> Result<Claims, AppError> {
     .map(|data| data.claims)
     .map_err(|e| AppError::Jwt(e.to_string()))
 }
+
+/// Decode and validate an RS256 JWT, trying each key in the store (supports key rotation).
+/// Returns the claims from the first key that successfully validates the token.
+pub fn decode_jwt_rs256(
+    token: &str,
+    keys: &[crate::utils::rs256::RsaKeyPair],
+) -> Result<Claims, AppError> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = true;
+
+    for key in keys {
+        let decoding_key = key.decoding_key()?;
+        if let Ok(data) = decode::<Claims>(token, &decoding_key, &validation) {
+            return Ok(data.claims);
+        }
+    }
+    Err(AppError::InvalidToken)
+}

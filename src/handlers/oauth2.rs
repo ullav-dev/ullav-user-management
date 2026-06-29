@@ -183,9 +183,26 @@ pub async fn as_metadata(state: web::Data<AppState>) -> HttpResponse {
             "grant_types_supported":                 ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported":      ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported":                      ["mcp:tools"],
+            "scopes_supported":                      ["mcp:tools", "obair:tools"],
             "subject_types_supported":               ["public"],
         }))
+}
+
+// ── Product access gate ───────────────────────────────────────────────────────
+
+/// Maps a resource URI path to the product scope that should be stamped in the
+/// access token when the user is entitled.  Returns `None` for resources that
+/// have no product gate (e.g. Cunav — any authenticated user may file tickets).
+///
+/// `"obair:tools"` is added to tokens bound to the AWE MCP (`/mcp`) and
+/// Togra MCP (`/togra/mcp`) resources; both are gated on the `"obair"` product.
+fn resource_to_product_gate(resource: &str) -> Option<(&'static str, &'static str)> {
+    // (product_slug, scope_to_stamp)
+    let path = url::Url::parse(resource).ok()?.path().to_owned();
+    match path.as_str() {
+        "/mcp" | "/togra/mcp" => Some(("obair", "obair:tools")),
+        _ => None,
+    }
 }
 
 // ── Dynamic Client Registration (RFC 7591 + CIMD) ────────────────────────────
@@ -360,10 +377,8 @@ pub async fn authorize_get(
         let hash = sha256_hex(&session_token);
         if let Ok(session) = db::oauth2::get_user_session(&state.pool, &hash).await {
             if client.first_party {
-                let url = build_code_redirect(&state, session.user_id, &query).await?;
-                return Ok(HttpResponse::Found()
-                    .append_header(("Location", url.as_str()))
-                    .finish());
+                let result = build_code_redirect(&state, session.user_id, &query).await;
+                return handle_code_redirect(result, &query.redirect_uri, query.state.as_deref());
             } else {
                 let user = db::get_user_by_id(&state.pool, session.user_id).await?;
                 return Ok(HttpResponse::Ok()
@@ -429,10 +444,8 @@ pub async fn authorize_post(
             if let Ok(session) = db::oauth2::get_user_session(&state.pool, &hash).await {
                 return match action.as_str() {
                     "approve" => {
-                        let url = build_code_redirect(&state, session.user_id, &params).await?;
-                        Ok(HttpResponse::Found()
-                            .append_header(("Location", url.as_str()))
-                            .finish())
+                        let result = build_code_redirect(&state, session.user_id, &params).await;
+                        handle_code_redirect(result, &params.redirect_uri, params.state.as_deref())
                     }
                     _ => {
                         let url = error_redirect(&params.redirect_uri, "access_denied", params.state.as_deref());
@@ -478,11 +491,21 @@ pub async fn authorize_post(
     let cookie = make_session_cookie(&raw_token);
 
     if client.first_party {
-        let url = build_code_redirect(&state, user.id, &params).await?;
-        Ok(HttpResponse::Found()
-            .cookie(cookie)
-            .append_header(("Location", url.as_str()))
-            .finish())
+        let result = build_code_redirect(&state, user.id, &params).await;
+        match result {
+            Ok(url) => Ok(HttpResponse::Found()
+                .cookie(cookie)
+                .append_header(("Location", url.as_str()))
+                .finish()),
+            Err(AppError::OAuth2(msg)) if msg.starts_with("access_denied") => {
+                let url = error_redirect(&params.redirect_uri, "access_denied", params.state.as_deref());
+                Ok(HttpResponse::Found()
+                    .cookie(cookie)
+                    .append_header(("Location", url.as_str()))
+                    .finish())
+            }
+            Err(e) => Err(e),
+        }
     } else {
         Ok(HttpResponse::Ok()
             .cookie(cookie)
@@ -589,6 +612,18 @@ async fn refresh_token_grant(state: &AppState, form: &TokenForm, ip: &str) -> Re
         return Err(AppError::InvalidToken);
     }
 
+    // Re-enforce product gate: the user may have lost product access after the
+    // original token was issued (team membership revoked, product disabled).
+    // Fail the refresh so Claude re-triggers the authorization flow.
+    if let Some((product_slug, _)) = resource_to_product_gate(&old.resource) {
+        let has_access = db::user_has_product_access(&state.pool, old.user_id, product_slug).await?;
+        if !has_access {
+            return Err(AppError::OAuth2(format!(
+                "access_denied: user no longer has access to the \"{product_slug}\" product"
+            )));
+        }
+    }
+
     let user = db::get_user_by_id(&state.pool, old.user_id).await?;
     let access_token = mint_access_token(
         state, user.id, &user.username, &old.scope, &old.resource, client_id,
@@ -666,12 +701,28 @@ async fn build_code_redirect(
     user_id: Uuid,
     params: &AuthorizeParams,
 ) -> Result<Url, AppError> {
-    let scope = params.scope.as_deref().unwrap_or("mcp:tools");
-    let code = secure_hex_token(32);
+    let base_scope = params.scope.as_deref().unwrap_or("mcp:tools");
 
+    // Check product gate and enrich the scope that will be stamped in the token.
+    // Users who lack the required product are rejected here — before an auth code
+    // is created — so no token is ever issued to them for this resource.
+    let scope = if let Some((product_slug, product_scope)) = resource_to_product_gate(&params.resource) {
+        let has_access = db::user_has_product_access(&state.pool, user_id, product_slug).await?;
+        if !has_access {
+            return Err(AppError::OAuth2(format!(
+                "access_denied: your account does not have access to the \"{product_slug}\" product"
+            )));
+        }
+        // Stamp the product scope so the resource server can verify it without a DB lookup.
+        format!("{base_scope} {product_scope}")
+    } else {
+        base_scope.to_owned()
+    };
+
+    let code = secure_hex_token(32);
     db::oauth2::create_auth_code(
         &state.pool, &code, &params.client_id, user_id,
-        &params.redirect_uri, scope, &params.resource, &params.code_challenge,
+        &params.redirect_uri, &scope, &params.resource, &params.code_challenge,
         AUTH_CODE_TTL_MINUTES,
     ).await?;
 
@@ -682,6 +733,28 @@ async fn build_code_redirect(
         url.query_pairs_mut().append_pair("state", s);
     }
     Ok(url)
+}
+
+/// Convert a `build_code_redirect` result into an HTTP response, redirecting
+/// with `?error=access_denied` when the product gate rejects the user instead
+/// of propagating a server-side error (which would produce a 400/500 page).
+fn handle_code_redirect(
+    result: Result<Url, AppError>,
+    redirect_uri: &str,
+    state_param: Option<&str>,
+) -> Result<HttpResponse, AppError> {
+    match result {
+        Ok(url) => Ok(HttpResponse::Found()
+            .append_header(("Location", url.as_str()))
+            .finish()),
+        Err(AppError::OAuth2(msg)) if msg.starts_with("access_denied") => {
+            let url = error_redirect(redirect_uri, "access_denied", state_param);
+            Ok(HttpResponse::Found()
+                .append_header(("Location", url.as_str()))
+                .finish())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn error_redirect(redirect_uri: &str, error: &str, state: Option<&str>) -> Url {
@@ -770,6 +843,7 @@ fn scope_description(scope: &str) -> &'static str {
         "cunav:support" => "Manage support tickets as a support team member",
         "cunav:read"    => "View your Cunav support tickets (read-only)",
         "obair"         => "Access your AWE workflows and execution history",
+        "obair:tools"   => "Use AI tools on your AWE projects and workflows",
         "clann"         => "View and edit your Clann family tree data",
         "dam"           => "Access your DAM digital assets",
         "mcp:tools"     => "Use AI-assisted tools on your behalf",

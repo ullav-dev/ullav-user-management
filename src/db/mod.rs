@@ -2218,3 +2218,30 @@ pub async fn admin_list_user_teams(
 
     Ok(result)
 }
+
+/// Returns `true` if the user is an active member of at least one team that
+/// has `product_slug` enabled in `team_product_access`.
+///
+/// Used by the OAuth2 token endpoint to gate access-token issuance to products
+/// that require explicit team-level enablement (e.g. `"obair"` for AWE/Togra).
+pub async fn user_has_product_access(
+    pool: &deadpool_postgres::Pool,
+    user_id: Uuid,
+    product_slug: &str,
+) -> Result<bool, AppError> {
+    let conn = pool.get().await?;
+    let row = conn
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM team_members tm
+                 JOIN team_product_access tpa ON tpa.team_id = tm.team_id
+                 WHERE tm.user_id    = $1
+                   AND tm.status     = 'active'
+                   AND tpa.product_slug = $2
+             )",
+            &[&user_id, &product_slug],
+        )
+        .await?;
+    Ok(row.get(0))
+}

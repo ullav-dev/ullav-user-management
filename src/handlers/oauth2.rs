@@ -183,7 +183,7 @@ pub async fn as_metadata(state: web::Data<AppState>) -> HttpResponse {
             "grant_types_supported":                 ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported":      ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported":                      ["mcp:tools", "obair:tools"],
+            "scopes_supported":                      ["mcp:tools", "obair:tools", "cunav:tools"],
             "subject_types_supported":               ["public"],
         }))
 }
@@ -192,15 +192,18 @@ pub async fn as_metadata(state: web::Data<AppState>) -> HttpResponse {
 
 /// Maps a resource URI path to the product scope that should be stamped in the
 /// access token when the user is entitled.  Returns `None` for resources that
-/// have no product gate (e.g. Cunav — any authenticated user may file tickets).
+/// have no product gate.
 ///
-/// `"obair:tools"` is added to tokens bound to the AWE MCP (`/mcp`) and
-/// Togra MCP (`/togra/mcp`) resources; both are gated on the `"obair"` product.
+/// `"obair:tools"` is stamped on tokens for the AWE MCP (`/mcp`) and
+/// Togra MCP (`/togra/mcp`); both are gated on the `"obair"` product.
+/// `"cunav:tools"` is stamped on tokens for the Cunav MCP (`/cunav/mcp`),
+/// gated on the `"cunav"` product (team-enabled).
 fn resource_to_product_gate(resource: &str) -> Option<(&'static str, &'static str)> {
     // (product_slug, scope_to_stamp)
     let path = url::Url::parse(resource).ok()?.path().to_owned();
     match path.as_str() {
         "/mcp" | "/togra/mcp" => Some(("obair", "obair:tools")),
+        "/cunav/mcp"          => Some(("cunav", "cunav:tools")),
         _ => None,
     }
 }
@@ -911,6 +914,7 @@ fn login_html(params: &AuthorizeParams, error: Option<&str>) -> String {
 fn scope_description(scope: &str) -> &'static str {
     match scope {
         "cunav"         => "View and manage your Cunav support tickets",
+        "cunav:tools"   => "Use AI tools to manage support tickets via Cunav MCP",
         "cunav:support" => "Manage support tickets as a support team member",
         "cunav:read"    => "View your Cunav support tickets (read-only)",
         "obair"         => "Access your AWE workflows and execution history",

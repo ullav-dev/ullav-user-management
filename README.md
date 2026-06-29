@@ -79,6 +79,86 @@ Data is persisted in **PostgreSQL** using native SQL (no ORM).
 | `GET`  | `/openapi.yaml` | — | OpenAPI spec (YAML) |
 | `GET`  | `/openapi.json` | — | OpenAPI spec (JSON) |
 | `GET`  | `/docs` | — | Swagger UI |
+| `GET`  | `/.well-known/oauth-authorization-server` | — | RFC 8414 AS metadata |
+| `GET`  | `/oauth2/jwks` | — | RS256 public keys (JWKS) |
+| `POST` | `/oauth2/register` | — | RFC 7591 Dynamic Client Registration |
+| `GET`  | `/oauth2/authorize` | — | Begin authorization code + PKCE flow |
+| `POST` | `/oauth2/authorize` | — | Submit login credentials or account chooser action |
+| `POST` | `/oauth2/token` | — | Exchange code for tokens; refresh token rotation |
+| `POST` | `/oauth2/revoke` | — | Revoke a refresh token |
+
+---
+
+## OAuth2 Authorization Server
+
+UUM acts as an OAuth2 Authorization Server (RFC 6749 / RFC 7636 PKCE) for all Ullav MCP resource servers. Clients — such as Claude Code's native MCP transport or `mcp-remote` — use the standard Authorization Code + PKCE flow to obtain audience-bound RS256 tokens.
+
+### Discovery endpoints
+
+| Path | Description |
+|------|-------------|
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 AS metadata (issuer, endpoints, supported scopes) |
+| `GET /oauth2/jwks` | JSON Web Key Set for RS256 token verification |
+| `GET /oauth2/register` | RFC 7591 Dynamic Client Registration |
+
+### Authorization flow
+
+```
+Client                        Browser                        UUM
+  │                              │                             │
+  │── open /oauth2/authorize ──▶ │                             │
+  │   (PKCE code_challenge)      │── GET /oauth2/authorize ──▶ │
+  │                              │                             │ check session cookie
+  │                              │◀── account chooser / ───── │
+  │                              │    login form               │
+  │                              │── POST /oauth2/authorize ─▶ │
+  │                              │   (credentials or continue) │
+  │                              │◀── redirect with code ───── │
+  │◀── code via callback ────── │                             │
+  │── POST /oauth2/token ───────────────────────────────────▶ │
+  │◀── access_token + refresh_token ──────────────────────── │
+```
+
+### Account chooser and switching accounts
+
+When a browser session already exists and the client is first-party (e.g. all MCP clients), UUM shows an **account chooser** page instead of silently redirecting:
+
+- **"Continue as [email]"** — auto-focused button; press Enter to proceed with the existing account. This is the default path — no account switch needed.
+- **"Use a different account"** — link that reloads the authorize flow with `prompt=login`, clearing session reuse and showing the login form directly.
+
+This is important for users with multiple accounts (e.g. a personal account and a business account, or different roles on different products). Without it, whichever account was last used in the browser would be silently picked.
+
+### `prompt=login`
+
+Append `prompt=login` to any `/oauth2/authorize` URL to force re-authentication regardless of an existing session:
+
+```
+/oauth2/authorize?...&prompt=login
+```
+
+The session cookie is ignored and the login form is shown directly. This is the mechanism the "Use a different account" link uses. MCP clients that support the `prompt` parameter can also send it in the initial authorization request.
+
+### Scopes
+
+| Scope | Meaning |
+|-------|---------|
+| `mcp:tools` | Use AI-assisted tools on the user's behalf |
+| `obair:tools` | Use AI tools on AWE projects and workflows (requires the `obair` product) |
+
+UUM enforces a product access gate at token issuance: if the requested `resource` maps to a gated product and the user does not have access, the authorization code is not issued and the browser is redirected back to the client with `error=access_denied`.
+
+### OAuth2 configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OAUTH2_ISSUER` | — | Issuer URL embedded in tokens and AS metadata (required for OAuth2) |
+| `OAUTH2_PRIVATE_KEY_FILE` | — | Path to PEM-encoded RSA private key for RS256 token signing |
+| `OAUTH2_SESSION_TTL_DAYS` | `30` | Browser session cookie lifetime |
+| `OAUTH2_AUTH_CODE_TTL_MINUTES` | `10` | Authorization code lifetime |
+| `OAUTH2_ACCESS_TOKEN_TTL_MINUTES` | `60` | Access token lifetime |
+| `OAUTH2_REFRESH_TOKEN_TTL_DAYS` | `90` | Refresh token lifetime |
+
+---
 
 ### POST /users
 

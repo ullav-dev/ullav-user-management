@@ -925,6 +925,7 @@ fn scope_description(scope: &str) -> &'static str {
 fn consent_html(params: &AuthorizeParams, username: &str, client_name: &str) -> String {
     let scope_str = params.scope.as_deref().unwrap_or("mcp:tools");
     let hidden = hidden_oauth2_fields(params);
+    let switch_url = switch_account_url(params);
 
     // Build a list of human-readable scope descriptions.
     let scope_items: String = scope_str
@@ -970,6 +971,9 @@ fn consent_html(params: &AuthorizeParams, username: &str, client_name: &str) -> 
     .deny{{background:#e5e7eb;color:#374151}}
     .deny:hover{{background:#d1d5db}}
     .footer{{margin-top:1.25rem;font-size:.78rem;color:#9ca3af;text-align:center}}
+    .switch{{display:block;margin-top:.6rem;font-size:.78rem;color:#6b7280;
+             text-decoration:none;text-align:center}}
+    .switch:hover{{color:#374151;text-decoration:underline}}
   </style>
 </head>
 <body>
@@ -989,6 +993,7 @@ fn consent_html(params: &AuthorizeParams, username: &str, client_name: &str) -> 
         <button class="approve" type="submit" name="action" value="approve">Allow</button>
       </div>
     </form>
+    <a class="switch" href="{switch_url_esc}">Use a different account</a>
     <p class="footer">
       You can revoke access at any time from your Ullav account settings.
     </p>
@@ -998,5 +1003,6 @@ fn consent_html(params: &AuthorizeParams, username: &str, client_name: &str) -> 
         client_name_esc = html_escape(client_name),
         username_esc    = html_escape(username),
         scope_items     = scope_items,
+        switch_url_esc  = html_escape(&switch_url),
     )
 }

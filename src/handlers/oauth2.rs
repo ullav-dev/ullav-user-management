@@ -183,29 +183,50 @@ pub async fn as_metadata(state: web::Data<AppState>) -> HttpResponse {
             "grant_types_supported":                 ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported":      ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported":                      ["mcp:tools", "obair:tools", "cunav:tools"],
+            "scopes_supported":                      ["mcp:tools", "obair:tools", "cunav:tools", "dam:tools", "collection:tools"],
             "subject_types_supported":               ["public"],
         }))
 }
 
 // ── Product access gate ───────────────────────────────────────────────────────
 
-/// Maps a resource URI path to the product scope that should be stamped in the
+/// Maps a resource URI to the product scope that should be stamped in the
 /// access token when the user is entitled.  Returns `None` for resources that
 /// have no product gate.
 ///
-/// `"obair:tools"` is stamped on tokens for the AWE MCP (`/mcp`) and
-/// Togra MCP (`/togra/mcp`); both are gated on the `"obair"` product.
-/// `"cunav:tools"` is stamped on tokens for the Cunav MCP (`/cunav/mcp`),
-/// gated on the `"cunav"` product (team-enabled).
+/// Unique paths win without ambiguity (`/cunav/mcp`, `/togra/mcp`).  For `/mcp`
+/// — which is used by multiple servers on different hosts — the hostname is
+/// checked for a product keyword.  On localhost the port disambiguates:
+///   - :8085 → obair (awe-server default)
+///   - :8080 → dam  (ullav-dam-server default)
+///   - :8087 → collection (ullav-collection-server MCP default)
 fn resource_to_product_gate(resource: &str) -> Option<(&'static str, &'static str)> {
-    // (product_slug, scope_to_stamp)
-    let path = url::Url::parse(resource).ok()?.path().to_owned();
-    match path.as_str() {
-        "/mcp" | "/togra/mcp" => Some(("obair", "obair:tools")),
-        "/cunav/mcp"          => Some(("cunav", "cunav:tools")),
-        _ => None,
+    let url = url::Url::parse(resource).ok()?;
+    let host = url.host_str().unwrap_or("").to_lowercase();
+    let port = url.port().unwrap_or(0);
+    let path = url.path();
+
+    // Unique paths are unambiguous regardless of host.
+    if path == "/cunav/mcp" || host.contains("cunav") {
+        return Some(("cunav", "cunav:tools"));
     }
+    if path == "/togra/mcp" {
+        return Some(("obair", "obair:tools"));
+    }
+
+    if path == "/mcp" {
+        // Staging/prod: distinguish by hostname keyword.
+        if host.contains("comad") || host.contains("dam") || port == 8080 {
+            return Some(("comad", "dam:tools"));
+        }
+        if host.contains("collection") || port == 8087 {
+            return Some(("collection", "collection:tools"));
+        }
+        // Default /mcp with no other distinguishing marker → obair.
+        return Some(("obair", "obair:tools"));
+    }
+
+    None
 }
 
 // ── Dynamic Client Registration (RFC 7591 + CIMD) ────────────────────────────
@@ -920,8 +941,11 @@ fn scope_description(scope: &str) -> &'static str {
         "obair"         => "Access your AWE workflows and execution history",
         "obair:tools"   => "Use AI tools on your AWE projects and workflows",
         "clann"         => "View and edit your Clann family tree data",
-        "dam"           => "Access your DAM digital assets",
-        "mcp:tools"     => "Use AI-assisted tools on your behalf",
+        "dam"               => "Access your DAM digital assets",
+        "dam:tools"         => "Use AI tools to search and browse your digital assets via DAM MCP",
+        "collection"        => "Access your collection management data",
+        "collection:tools"  => "Use AI tools to browse and annotate your collection via Collection MCP",
+        "mcp:tools"         => "Use AI-assisted tools on your behalf",
         _               => "Additional access",
     }
 }

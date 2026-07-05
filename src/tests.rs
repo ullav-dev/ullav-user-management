@@ -385,6 +385,38 @@ mod jwt_tests {
             assert!(team.product_roles.is_empty(), "product_roles must default to empty");
         }
     }
+
+    #[test]
+    fn test_jwt_missing_roles_permissions_defaults_empty_like_mcp_token() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use serde::Serialize;
+
+        // Mirrors an MCP OAuth2 access token (ullav_mcp_auth::McpClaims): carries
+        // sub/iat/exp but no roles/permissions, since those aren't part of that
+        // token's shape. Claims::roles/permissions must default to empty so such
+        // tokens still decode (as an identified caller with no roles) instead of
+        // failing outright with "invalid token".
+        #[derive(Serialize)]
+        struct MinimalClaims {
+            sub: String,
+            iat: i64,
+            exp: i64,
+        }
+
+        let secret = "test_secret";
+        let claims = MinimalClaims {
+            sub: Uuid::new_v4().to_string(),
+            iat: chrono::Utc::now().timestamp(),
+            exp: chrono::Utc::now().timestamp() + 3600,
+        };
+        let token = encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
+            .expect("encode should succeed");
+
+        let decoded = decode_jwt(&token, secret)
+            .expect("decode_jwt should succeed even without roles/permissions");
+        assert!(decoded.roles.is_empty());
+        assert!(decoded.permissions.is_empty());
+    }
 }
 
 #[cfg(test)]

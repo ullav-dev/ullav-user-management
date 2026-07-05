@@ -63,8 +63,14 @@ pub struct Claims {
     #[serde(default)]
     pub username: String,
     /// Roles assigned to the user.
+    /// Defaults to empty so tokens without this field (e.g. MCP OAuth2 access tokens,
+    /// which carry `sub`/`aud`/`scope` but no role/permission data) still decode —
+    /// they're identified but hold no roles, so permission-gated routes still 403 them.
+    #[serde(default)]
     pub roles: Vec<String>,
     /// Permissions granted to the user (union of all role permissions).
+    /// Defaults to empty for the same reason as `roles`.
+    #[serde(default)]
     pub permissions: Vec<String>,
     /// Active subscriptions keyed by product slug.
     /// Defaults to an empty map so tokens issued before subscriptions were added still decode.

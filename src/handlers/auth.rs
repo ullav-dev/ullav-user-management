@@ -8,7 +8,7 @@ use crate::{
     utils::{
         app_url::resolve_app_url,
         email::send_password_reset_email,
-        jwt::{create_jwt, create_jwt_rs256, decode_jwt, Claims, SubscriptionClaim, TeamClaim},
+        jwt::{create_jwt, create_jwt_rs256, decode_jwt, Claims},
         password::{generate_secure_token, hash_password, validate_password, verify_password},
     },
     AppState,
@@ -19,7 +19,6 @@ use chrono::Utc;
 use deadpool_postgres::Pool;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 /// `POST /auth/login` — Authenticate a user and return a JWT.
@@ -39,46 +38,8 @@ pub async fn login(
         return Err(AppError::InvalidCredentials);
     }
 
-    let (roles, mut permissions) =
-        db::get_user_roles_and_permissions(&state.pool, user.id).await?;
-
-    // Build subscription claims from the DB — keyed by product slug.
-    let raw_subs = db::get_all_user_subscriptions(&state.pool, user.id).await?;
-    let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
-        .into_iter()
-        .map(|s| {
-            let claim = SubscriptionClaim {
-                tier: s.plan.clone(),
-                status: s.status.clone(),
-                seat_count: if s.seat_count > 1 { Some(s.seat_count) } else { None },
-            };
-            (s.product_slug, claim)
-        })
-        .collect();
-
-    // Grant teams:create to users with an active/trialing Family, Professional, or Enterprise
-    // Clann subscription — without requiring the admin role to manually assign the permission.
-    let clann_eligible = subscriptions.get("clann").map_or(false, |s| {
-        matches!(s.status.as_str(), "active" | "trialing")
-            && matches!(s.tier.as_str(), "family" | "professional" | "enterprise")
-    });
-    if clann_eligible && !permissions.contains(&"teams:create".to_string()) {
-        permissions.push("teams:create".to_string());
-        permissions.sort();
-    }
-
-    // Build team claims — only active memberships, keyed by team UUID string.
-    let raw_teams = db::get_user_active_teams(&state.pool, user.id).await?;
-    let teams: HashMap<String, TeamClaim> = raw_teams
-        .into_iter()
-        .map(|t| (t.team_id, TeamClaim {
-            name: t.name,
-            role: t.role,
-            team_roles: t.team_roles,
-            product_roles: t.product_roles,
-            products: t.products,
-        }))
-        .collect();
+    let (roles, permissions, subscriptions, teams) =
+        crate::utils::jwt::build_identity_claims(&state.pool, user.id).await?;
 
     let signing_key = state.oauth2_keys.read().await.primary_key().clone();
     let token = create_jwt_rs256(
@@ -138,42 +99,8 @@ pub async fn refresh(
 
     let user = db::get_user_by_id(&state.pool, user_id).await?;
 
-    let (roles, mut permissions) =
-        db::get_user_roles_and_permissions(&state.pool, user_id).await?;
-
-    let raw_subs = db::get_all_user_subscriptions(&state.pool, user_id).await?;
-    let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
-        .into_iter()
-        .map(|s| {
-            let claim = SubscriptionClaim {
-                tier: s.plan.clone(),
-                status: s.status.clone(),
-                seat_count: if s.seat_count > 1 { Some(s.seat_count) } else { None },
-            };
-            (s.product_slug, claim)
-        })
-        .collect();
-
-    let clann_eligible = subscriptions.get("clann").map_or(false, |s| {
-        matches!(s.status.as_str(), "active" | "trialing")
-            && matches!(s.tier.as_str(), "family" | "professional" | "enterprise")
-    });
-    if clann_eligible && !permissions.contains(&"teams:create".to_string()) {
-        permissions.push("teams:create".to_string());
-        permissions.sort();
-    }
-
-    let raw_teams = db::get_user_active_teams(&state.pool, user_id).await?;
-    let teams: HashMap<String, TeamClaim> = raw_teams
-        .into_iter()
-        .map(|t| (t.team_id, TeamClaim {
-            name: t.name,
-            role: t.role,
-            team_roles: t.team_roles,
-            product_roles: t.product_roles,
-            products: t.products,
-        }))
-        .collect();
+    let (roles, permissions, subscriptions, teams) =
+        crate::utils::jwt::build_identity_claims(&state.pool, user_id).await?;
 
     let signing_key = state.oauth2_keys.read().await.primary_key().clone();
     let token = create_jwt_rs256(

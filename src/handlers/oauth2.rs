@@ -12,6 +12,7 @@
 use crate::{
     db,
     errors::AppError,
+    utils::jwt::{build_identity_claims, SubscriptionClaim, TeamClaim},
     AppState,
 };
 use actix_web::{
@@ -101,16 +102,29 @@ fn html_escape(s: &str) -> String {
 
 // ── OAuth2 RS256 JWT claims ───────────────────────────────────────────────────
 
+/// `pub(crate)` (rather than private) so `src/tests.rs` can construct/decode it directly.
 #[derive(Serialize, Deserialize)]
-struct OAuth2Claims {
-    iss: String,
-    sub: String,
-    aud: String,
-    iat: i64,
-    exp: i64,
-    scope: String,
-    client_id: String,
-    username: String,
+pub(crate) struct OAuth2Claims {
+    pub(crate) iss: String,
+    pub(crate) sub: String,
+    pub(crate) aud: String,
+    pub(crate) iat: i64,
+    pub(crate) exp: i64,
+    pub(crate) scope: String,
+    pub(crate) client_id: String,
+    pub(crate) username: String,
+    /// Roles assigned to the user. Defaults to empty so tokens minted before this
+    /// field was added still decode.
+    #[serde(default)]
+    pub(crate) roles: Vec<String>,
+    /// Active subscriptions keyed by product slug. Defaults to an empty map so
+    /// tokens minted before this field was added still decode.
+    #[serde(default)]
+    pub(crate) subscriptions: HashMap<String, SubscriptionClaim>,
+    /// Active team memberships keyed by team UUID string. Defaults to an empty map
+    /// so tokens minted before this field was added still decode.
+    #[serde(default)]
+    pub(crate) teams: HashMap<String, TeamClaim>,
 }
 
 async fn mint_access_token(
@@ -121,6 +135,11 @@ async fn mint_access_token(
     resource: &str,
     client_id: &str,
 ) -> Result<String, AppError> {
+    // Embed the same identity data `/auth/login` embeds, so MCP resource servers
+    // can apply the same plan-based quota/access logic as the REST APIs.
+    let (roles, _permissions, subscriptions, teams) =
+        build_identity_claims(&state.pool, user_id).await?;
+
     let now = Utc::now();
     let claims = OAuth2Claims {
         iss: state.oauth2_issuer.clone(),
@@ -131,6 +150,9 @@ async fn mint_access_token(
         scope: scope.to_owned(),
         client_id: client_id.to_owned(),
         username: username.to_owned(),
+        roles,
+        subscriptions,
+        teams,
     };
     let keys = state.oauth2_keys.read().await;
     let signing_key = keys.primary_key();

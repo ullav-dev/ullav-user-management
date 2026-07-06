@@ -173,11 +173,23 @@ pub fn decode_jwt_rs256(
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
 
+    let mut last_err = None;
     for key in keys {
         let decoding_key = key.decoding_key()?;
-        if let Ok(data) = decode::<Claims>(token, &decoding_key, &validation) {
-            return Ok(data.claims);
+        match decode::<Claims>(token, &decoding_key, &validation) {
+            Ok(data) => return Ok(data.claims),
+            Err(e) => last_err = Some(e),
         }
+    }
+    // Temporary diagnostic: the middleware collapses every failure mode (bad
+    // signature, expired, wrong claims shape, wrong algorithm) into the same
+    // generic 401, which made a real client-reported failure impossible to
+    // triage from logs alone. Logging the concrete jsonwebtoken error here
+    // (kind, not the token itself) is safe and removable once diagnosed.
+    if let Some(e) = last_err {
+        log::warn!("decode_jwt_rs256: all {} key(s) failed, last error: {:?}", keys.len(), e.kind());
+    } else {
+        log::warn!("decode_jwt_rs256: no active keys available to try");
     }
     Err(AppError::InvalidToken)
 }

@@ -172,6 +172,16 @@ pub fn decode_jwt_rs256(
 ) -> Result<Claims, AppError> {
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
+    // This function validates both plain login tokens (no `aud` claim) and MCP OAuth2
+    // access tokens (audience-bound to a specific resource server, e.g. an awe-server
+    // MCP endpoint). `Validation::new` defaults `validate_aud` to true, and this crate
+    // version treats "token has an aud claim, validator has none configured" as an
+    // InvalidAudience failure rather than skipping the check — which silently rejected
+    // every MCP token here. Audience isn't this function's concern: whoever forwards a
+    // token to a specific resource server is responsible for checking it's the intended
+    // audience, same as ullav_mcp_auth::TokenValidator::validate_as does for this exact
+    // "service-API token with no audience check" case.
+    validation.validate_aud = false;
 
     let mut last_err = None;
     for key in keys {

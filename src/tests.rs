@@ -218,7 +218,9 @@ mod password_tests {
 
 #[cfg(test)]
 mod jwt_tests {
-    use crate::utils::jwt::{create_jwt, decode_jwt, SubscriptionClaim, TeamClaim};
+    use crate::utils::jwt::{create_jwt, decode_jwt, decode_jwt_rs256, SubscriptionClaim, TeamClaim};
+    use crate::utils::rs256::RsaKeyPair;
+    use crate::tests::TEST_RSA_KEY_PEM;
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -416,6 +418,41 @@ mod jwt_tests {
             .expect("decode_jwt should succeed even without roles/permissions");
         assert!(decoded.roles.is_empty());
         assert!(decoded.permissions.is_empty());
+    }
+
+    #[test]
+    fn test_decode_jwt_rs256_accepts_token_with_audience_claim() {
+        use jsonwebtoken::encode;
+        use serde::Serialize;
+
+        // Mirrors an MCP OAuth2 access token (ullav_mcp_auth::McpClaims): RS256-signed,
+        // audience-bound to a specific resource server, no roles/permissions.
+        // decode_jwt_rs256 doesn't call Validation::set_audience, but jsonwebtoken's
+        // Validation::new defaults validate_aud to true — which rejected any token
+        // carrying an `aud` claim as InvalidAudience, since none was configured to
+        // check against. This silently broke every MCP-token-forwarding call (GET
+        // /teams) until validate_aud was explicitly turned off.
+        #[derive(Serialize)]
+        struct McpLikeClaims {
+            sub: String,
+            aud: String,
+            iat: i64,
+            exp: i64,
+        }
+
+        let pair = RsaKeyPair::from_pem(TEST_RSA_KEY_PEM).expect("key should load");
+        let claims = McpLikeClaims {
+            sub: Uuid::new_v4().to_string(),
+            aud: "http://localhost:8085/togra/mcp".to_string(),
+            iat: chrono::Utc::now().timestamp(),
+            exp: chrono::Utc::now().timestamp() + 3600,
+        };
+        let token = encode(&pair.jwt_header(), &claims, pair.encoding_key())
+            .expect("encode should succeed");
+
+        let decoded = decode_jwt_rs256(&token, std::slice::from_ref(&pair))
+            .expect("decode_jwt_rs256 should accept a token with an aud claim");
+        assert_eq!(decoded.sub, claims.sub);
     }
 }
 

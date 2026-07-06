@@ -82,6 +82,56 @@ pub struct Claims {
     pub teams: HashMap<String, TeamClaim>,
 }
 
+/// Fetch and assemble a user's roles, permissions, subscriptions, and active team
+/// memberships — shared by `/auth/login` and MCP OAuth2 token minting so both
+/// issue tokens describing the same identity data.
+pub async fn build_identity_claims(
+    pool: &deadpool_postgres::Pool,
+    user_id: Uuid,
+) -> Result<(Vec<String>, Vec<String>, HashMap<String, SubscriptionClaim>, HashMap<String, TeamClaim>), AppError> {
+    let (roles, mut permissions) = crate::db::get_user_roles_and_permissions(pool, user_id).await?;
+
+    // Build subscription claims from the DB — keyed by product slug.
+    let raw_subs = crate::db::get_all_user_subscriptions(pool, user_id).await?;
+    let subscriptions: HashMap<String, SubscriptionClaim> = raw_subs
+        .into_iter()
+        .map(|s| {
+            let claim = SubscriptionClaim {
+                tier: s.plan.clone(),
+                status: s.status.clone(),
+                seat_count: if s.seat_count > 1 { Some(s.seat_count) } else { None },
+            };
+            (s.product_slug, claim)
+        })
+        .collect();
+
+    // Grant teams:create to users with an active/trialing Family, Professional, or Enterprise
+    // Clann subscription — without requiring the admin role to manually assign the permission.
+    let clann_eligible = subscriptions.get("clann").map_or(false, |s| {
+        matches!(s.status.as_str(), "active" | "trialing")
+            && matches!(s.tier.as_str(), "family" | "professional" | "enterprise")
+    });
+    if clann_eligible && !permissions.contains(&"teams:create".to_string()) {
+        permissions.push("teams:create".to_string());
+        permissions.sort();
+    }
+
+    // Build team claims — only active memberships, keyed by team UUID string.
+    let raw_teams = crate::db::get_user_active_teams(pool, user_id).await?;
+    let teams: HashMap<String, TeamClaim> = raw_teams
+        .into_iter()
+        .map(|t| (t.team_id, TeamClaim {
+            name: t.name,
+            role: t.role,
+            team_roles: t.team_roles,
+            product_roles: t.product_roles,
+            products: t.products,
+        }))
+        .collect();
+
+    Ok((roles, permissions, subscriptions, teams))
+}
+
 /// Create a signed JWT for the given user id.
 pub fn create_jwt(
     user_id: Uuid,

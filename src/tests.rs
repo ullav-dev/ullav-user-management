@@ -457,6 +457,112 @@ mod jwt_tests {
 }
 
 #[cfg(test)]
+mod oauth2_claims_tests {
+    use crate::handlers::oauth2::OAuth2Claims;
+    use crate::utils::jwt::{SubscriptionClaim, TeamClaim};
+    use crate::utils::rs256::RsaKeyPair;
+    use crate::tests::TEST_RSA_KEY_PEM;
+    use jsonwebtoken::{decode, encode, Algorithm, Validation};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    fn base_claims(roles: Vec<String>, subscriptions: HashMap<String, SubscriptionClaim>, teams: HashMap<String, TeamClaim>) -> OAuth2Claims {
+        let now = chrono::Utc::now().timestamp();
+        OAuth2Claims {
+            iss: "http://localhost:8081".into(),
+            sub: Uuid::new_v4().to_string(),
+            aud: "http://localhost:8085/dam/mcp".into(),
+            iat: now,
+            exp: now + 3600,
+            scope: "dam:tools".into(),
+            client_id: "claude-desktop".into(),
+            username: "testuser".into(),
+            roles,
+            subscriptions,
+            teams,
+        }
+    }
+
+    fn decode_roundtrip(claims: &OAuth2Claims, pair: &RsaKeyPair) -> OAuth2Claims {
+        let token = encode(&pair.jwt_header(), claims, pair.encoding_key())
+            .expect("encode should succeed");
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.validate_aud = false;
+        decode::<OAuth2Claims>(&token, &pair.decoding_key().expect("decoding key"), &validation)
+            .expect("decode should succeed")
+            .claims
+    }
+
+    #[test]
+    fn plan_data_round_trips_through_mint_and_decode() {
+        let pair = RsaKeyPair::from_pem(TEST_RSA_KEY_PEM).expect("key should load");
+        let mut subscriptions = HashMap::new();
+        subscriptions.insert(
+            "comad".to_string(),
+            SubscriptionClaim { tier: "team".into(), status: "active".into(), seat_count: None },
+        );
+        let mut teams = HashMap::new();
+        teams.insert("team-1".to_string(), TeamClaim {
+            name: "Engineering".into(), role: "owner".into(),
+            team_roles: vec![], product_roles: HashMap::new(), products: vec![],
+        });
+        let claims = base_claims(vec!["admin".into()], subscriptions, teams);
+
+        let decoded = decode_roundtrip(&claims, &pair);
+
+        assert_eq!(decoded.roles, vec!["admin".to_string()]);
+        assert_eq!(decoded.subscriptions["comad"].tier, "team");
+        assert_eq!(decoded.teams["team-1"].role, "owner");
+    }
+
+    /// Mirrors an MCP OAuth2 access token minted before roles/subscriptions/teams
+    /// were added — the on-the-wire JSON simply doesn't have those keys. They must
+    /// default to empty so `ullav_mcp_auth::McpClaims` (which has the same
+    /// `#[serde(default)]` fields) keeps decoding pre-existing tokens.
+    #[test]
+    fn legacy_token_without_plan_fields_still_decodes() {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct LegacyOAuth2Claims {
+            iss: String,
+            sub: String,
+            aud: String,
+            iat: i64,
+            exp: i64,
+            scope: String,
+            client_id: String,
+            username: String,
+        }
+
+        let pair = RsaKeyPair::from_pem(TEST_RSA_KEY_PEM).expect("key should load");
+        let now = chrono::Utc::now().timestamp();
+        let legacy = LegacyOAuth2Claims {
+            iss: "http://localhost:8081".into(),
+            sub: Uuid::new_v4().to_string(),
+            aud: "http://localhost:8085/dam/mcp".into(),
+            iat: now,
+            exp: now + 3600,
+            scope: "dam:tools".into(),
+            client_id: "claude-desktop".into(),
+            username: "testuser".into(),
+        };
+        let token = encode(&pair.jwt_header(), &legacy, pair.encoding_key())
+            .expect("encode should succeed");
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.validate_aud = false;
+        let decoded = decode::<OAuth2Claims>(&token, &pair.decoding_key().expect("decoding key"), &validation)
+            .expect("legacy token should still decode")
+            .claims;
+
+        assert!(decoded.roles.is_empty());
+        assert!(decoded.subscriptions.is_empty());
+        assert!(decoded.teams.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod handler_tests {
     use actix_web::{test, web, App};
     use deadpool_postgres::{Config as PoolConfig, Runtime};

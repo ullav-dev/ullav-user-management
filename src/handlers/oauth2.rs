@@ -202,9 +202,11 @@ pub async fn as_metadata(state: web::Data<AppState>) -> HttpResponse {
             "registration_endpoint":                 format!("{iss}/oauth2/register"),
             "revocation_endpoint":                   format!("{iss}/oauth2/revoke"),
             "response_types_supported":              ["code"],
-            "grant_types_supported":                 ["authorization_code", "refresh_token"],
+            "grant_types_supported":                 ["authorization_code", "refresh_token", "client_credentials"],
             "code_challenge_methods_supported":      ["S256"],
-            "token_endpoint_auth_methods_supported": ["none"],
+            // "none" — existing public/DCR clients (PKCE only, e.g. Claude Desktop/Code).
+            // "client_secret_post" — confidential service clients using client_credentials.
+            "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
             "scopes_supported":                      ["mcp:tools", "obair:tools", "cunav:tools", "dam:tools", "collection:tools"],
             "subject_types_supported":               ["public"],
         }))
@@ -579,6 +581,10 @@ pub struct TokenForm {
     client_id: Option<String>,
     code_verifier: Option<String>,
     refresh_token: Option<String>,
+    // client_credentials grant (confidential/service clients only).
+    client_secret: Option<String>,
+    resource: Option<String>,
+    scope: Option<String>,
 }
 
 /// `POST /oauth2/token` — Exchange auth code or refresh token for an access token.
@@ -599,8 +605,80 @@ pub async fn token(
     match form.grant_type.as_str() {
         "authorization_code" => auth_code_grant(&state, &form, &ip).await,
         "refresh_token"      => refresh_token_grant(&state, &form, &ip).await,
+        "client_credentials" => client_credentials_grant(&state, &form, &ip).await,
         gt => Err(AppError::Validation(format!("unsupported grant_type: {gt}"))),
     }
+}
+
+/// `client_credentials` grant (RFC 6749 §4.4) — machine-to-machine callers
+/// with no human present. Only confidential clients provisioned via
+/// `POST /admin/oauth2/service-clients` (see `handlers::admin`) are eligible;
+/// public/DCR clients (`client_secret_hash IS NULL`) are rejected by
+/// `get_service_client` returning `NotFound`.
+///
+/// Unlike `authorization_code`/`refresh_token`, there's no stored auth code or
+/// refresh token to carry `resource`/`scope` forward from — both must be
+/// supplied directly in the token request, same as `authorize`'s
+/// `AuthorizeParams`. The minted token's `sub` is the client's bound
+/// service-account user, so it flows through the exact same product
+/// entitlement check (`resource_to_product_gate` + `user_has_product_access`)
+/// as a human's token — the service account must be a member of a team with
+/// the target product enabled, same as any other user.
+///
+/// No refresh token is issued — spec-correct for this grant. The caller just
+/// re-authenticates with its (non-expiring) client secret whenever it wants a
+/// new access token.
+async fn client_credentials_grant(state: &AppState, form: &TokenForm, ip: &str) -> Result<HttpResponse, AppError> {
+    let client_id = form.client_id.as_deref()
+        .ok_or_else(|| AppError::Validation("client_id required".into()))?;
+    let client_secret = form.client_secret.as_deref()
+        .ok_or_else(|| AppError::Validation("client_secret required".into()))?;
+    let resource = form.resource.as_deref()
+        .ok_or_else(|| AppError::Validation("resource is required (RFC 8707)".into()))?;
+
+    let client = db::oauth2::get_service_client(&state.pool, client_id)
+        .await
+        .map_err(|_| AppError::InvalidToken)?;
+
+    if !crate::utils::password::verify_password(client_secret, &client.client_secret_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+
+    let requested_scope = form.scope.as_deref().unwrap_or("");
+    let base_scope: Vec<&str> = requested_scope
+        .split_whitespace()
+        .filter(|s| client.allowed_scopes.iter().any(|a| a == s))
+        .collect();
+    let mut scope = base_scope.join(" ");
+
+    // Same product gate `build_code_redirect` applies for human logins: the
+    // service account must actually have the target product enabled on one
+    // of its teams, checked fresh on every token request (not just at
+    // provisioning time), so revoking the service account's team access cuts
+    // off new tokens immediately.
+    if let Some((product_slug, product_scope)) = resource_to_product_gate(resource) {
+        let has_access = db::user_has_product_access(&state.pool, client.service_account_user_id, product_slug).await?;
+        if !has_access {
+            return Err(AppError::OAuth2(format!(
+                "access_denied: service account for client {client_id:?} does not have access to the \"{product_slug}\" product"
+            )));
+        }
+        if !scope.split_whitespace().any(|s| s == product_scope) {
+            scope = if scope.is_empty() { product_scope.to_owned() } else { format!("{scope} {product_scope}") };
+        }
+    }
+
+    let user = db::get_user_by_id(&state.pool, client.service_account_user_id).await?;
+    let access_token = mint_access_token(
+        state, user.id, &user.username, &scope, resource, client_id,
+    ).await?;
+
+    db::oauth2::audit_log(
+        &state.pool, "token_issued", Some(user.id), Some(client_id),
+        Some(&scope), Some(resource), Some(ip), None,
+    ).await;
+
+    Ok(token_json_response(&access_token, &scope, None))
 }
 
 async fn auth_code_grant(state: &AppState, form: &TokenForm, ip: &str) -> Result<HttpResponse, AppError> {

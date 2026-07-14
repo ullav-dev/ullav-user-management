@@ -402,6 +402,36 @@ async fn main() -> std::io::Result<()> {
                             ))
                             .service(handlers::health::health_scoped),
                     )
+                    // OAuth2 key management — requires `oauth2:manage` (separate from users:read).
+                    //
+                    // Registered BEFORE the broader `/admin` scope below: actix-web's Scope
+                    // routing commits to the first scope whose prefix matches and does not
+                    // backtrack to try sibling scopes if the specific sub-route isn't found
+                    // within it. Since `/admin` is itself a prefix of `/admin/oauth2/...`, this
+                    // scope was completely unreachable when registered after `/admin` — every
+                    // request landed inside `/admin`'s middleware (gated by `users:read`, not
+                    // `oauth2:manage`), found no matching internal route, and 404'd from within
+                    // it. Confirmed via a temporary debug trace on the auth middleware: the
+                    // `required_permission` it logged for a request to `/admin/oauth2/keys` was
+                    // `Some("users:read")`, not `Some("oauth2:manage")`. Pre-existing bug, not
+                    // introduced by the `client_credentials` work — this fix also makes
+                    // `list_oauth2_keys`/`generate_oauth2_key`/`promote_oauth2_key`/
+                    // `retire_oauth2_key` reachable for the first time.
+                    .service(
+                        web::scope("/admin/oauth2")
+                            .wrap(middleware::auth::AuthMiddleware::require(
+                                jwt_secret.clone(),
+                                oauth2_keys_middleware.clone(),
+                                "oauth2:manage",
+                            ))
+                            .service(handlers::admin::list_oauth2_keys)
+                            .service(handlers::admin::generate_oauth2_key)
+                            .service(handlers::admin::promote_oauth2_key)
+                            .service(handlers::admin::retire_oauth2_key)
+                            .service(handlers::admin::create_service_client)
+                            .service(handlers::admin::list_service_clients)
+                            .service(handlers::admin::delete_service_client),
+                    )
                     // Admin user/role/subscription/team management — requires `users:read`
                     .service(
                         web::scope("/admin")
@@ -453,19 +483,6 @@ async fn main() -> std::io::Result<()> {
                             .service(handlers::admin::disable_team_product)
                             .service(handlers::admin::assign_member_product_role)
                             .service(handlers::admin::revoke_member_product_role),
-                    )
-                    // OAuth2 key management — requires `oauth2:manage` (separate from users:read)
-                    .service(
-                        web::scope("/admin/oauth2")
-                            .wrap(middleware::auth::AuthMiddleware::require(
-                                jwt_secret.clone(),
-                                oauth2_keys_middleware.clone(),
-                                "oauth2:manage",
-                            ))
-                            .service(handlers::admin::list_oauth2_keys)
-                            .service(handlers::admin::generate_oauth2_key)
-                            .service(handlers::admin::promote_oauth2_key)
-                            .service(handlers::admin::retire_oauth2_key),
                     ),
             )
             // Webhook endpoints — no auth, provider-signed payloads

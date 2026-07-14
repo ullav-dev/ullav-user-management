@@ -1192,15 +1192,61 @@ pub async fn create_team(
 
     let team_id: Uuid = row.get("id");
 
+    let member_row = tx
+        .query_one(
+            "INSERT INTO team_members (team_id, user_id, status, joined_at)
+             VALUES ($1, $2, 'active', NOW())
+             RETURNING id",
+            &[&team_id, &owner_id],
+        )
+        .await?;
+    let member_id: Uuid = member_row.get("id");
+
+    let role_row = tx
+        .query_one(
+            "INSERT INTO team_roles (team_id, name, description, is_all)
+             VALUES ($1, 'All', 'Everybody in the team', true)
+             RETURNING id",
+            &[&team_id],
+        )
+        .await?;
+    let all_role_id: Uuid = role_row.get("id");
+
     tx.execute(
-        "INSERT INTO team_members (team_id, user_id, status, joined_at)
-         VALUES ($1, $2, 'active', NOW())",
-        &[&team_id, &owner_id],
+        "INSERT INTO team_member_roles (team_id, role_id, member_id)
+         VALUES ($1, $2, $3)",
+        &[&team_id, &all_role_id, &member_id],
     )
     .await?;
 
     tx.commit().await?;
     Ok(team_id)
+}
+
+/// Assign a team's "All" role (identified structurally via is_all, not its renameable
+/// name) to a member by their team_members.id — used whenever a membership becomes
+/// active (invite acceptance, admin direct-add). No-op if the team has no "All" role
+/// (shouldn't happen post-migration) or the member is already assigned.
+///
+/// Takes a `GenericClient` so callers can run it inside the same transaction as the
+/// membership-activation write, keeping "member becomes active" and "gets the All role"
+/// atomic.
+async fn assign_all_role_to_member(
+    client: &impl deadpool_postgres::GenericClient,
+    member_id: Uuid,
+) -> Result<(), AppError> {
+    client
+        .execute(
+            "INSERT INTO team_member_roles (team_id, role_id, member_id)
+             SELECT tm.team_id, tr.id, tm.id
+             FROM team_members tm
+             JOIN team_roles tr ON tr.team_id = tm.team_id AND tr.is_all
+             WHERE tm.id = $1 AND tm.status = 'active'
+             ON CONFLICT DO NOTHING",
+            &[&member_id],
+        )
+        .await?;
+    Ok(())
 }
 
 /// Fetch the owner_id and leader_id for a team. Returns NotFound if the team does not exist.
@@ -1264,7 +1310,7 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
     // Fetch all role assignments for this team in one query, keyed by team_members.id.
     let role_rows = client
         .query(
-            "SELECT tmr.member_id, tr.id AS role_id, tr.name, tr.description,
+            "SELECT tmr.member_id, tr.id AS role_id, tr.name, tr.description, tr.is_all,
                     tr.created_at, tr.updated_at
              FROM team_member_roles tmr
              JOIN team_roles tr ON tr.id = tmr.role_id
@@ -1280,6 +1326,7 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
             id: row.get("role_id"),
             name: row.get("name"),
             description: row.get("description"),
+            is_all: row.get("is_all"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         });
@@ -1460,17 +1507,22 @@ pub async fn add_team_member_active(
     user_id: Uuid,
     added_by: Uuid,
 ) -> Result<(), AppError> {
-    let client = pool.get().await?;
-    client
-        .execute(
+    let mut client = pool.get().await?;
+    let tx = client.transaction().await?;
+    let row = tx
+        .query_one(
             "INSERT INTO team_members
                 (team_id, user_id, status, invited_by, joined_at)
              VALUES ($1, $2, 'active', $3, NOW())
              ON CONFLICT (team_id, user_id) DO UPDATE
-             SET status = 'active', joined_at = COALESCE(team_members.joined_at, NOW())",
+             SET status = 'active', joined_at = COALESCE(team_members.joined_at, NOW())
+             RETURNING id",
             &[&team_id, &user_id, &added_by],
         )
         .await?;
+    let member_id: Uuid = row.get("id");
+    assign_all_role_to_member(&tx, member_id).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1494,16 +1546,18 @@ pub async fn get_team_member_by_token(
 
 /// Accept an invitation: set status to active, record joined_at, clear the token.
 pub async fn accept_team_invitation(pool: &Pool, member_id: Uuid) -> Result<(), AppError> {
-    let client = pool.get().await?;
-    client
-        .execute(
-            "UPDATE team_members
-             SET status = 'active', joined_at = NOW(),
-                 invite_token = NULL, invite_token_expires_at = NULL
-             WHERE id = $1",
-            &[&member_id],
-        )
-        .await?;
+    let mut client = pool.get().await?;
+    let tx = client.transaction().await?;
+    tx.execute(
+        "UPDATE team_members
+         SET status = 'active', joined_at = NOW(),
+             invite_token = NULL, invite_token_expires_at = NULL
+         WHERE id = $1",
+        &[&member_id],
+    )
+    .await?;
+    assign_all_role_to_member(&tx, member_id).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1703,7 +1757,7 @@ pub async fn list_team_roles(pool: &Pool, team_id: Uuid) -> Result<Vec<TeamRoleR
     let client = pool.get().await?;
     let rows = client
         .query(
-            "SELECT id, name, description, created_at, updated_at
+            "SELECT id, name, description, is_all, created_at, updated_at
              FROM team_roles WHERE team_id = $1 ORDER BY name",
             &[&team_id],
         )
@@ -1723,7 +1777,7 @@ pub async fn create_team_role(
         .query_one(
             "INSERT INTO team_roles (team_id, name, description)
              VALUES ($1, $2, $3)
-             RETURNING id, name, description, created_at, updated_at",
+             RETURNING id, name, description, is_all, created_at, updated_at",
             &[&team_id, &name, &description],
         )
         .await
@@ -1755,7 +1809,7 @@ pub async fn update_team_role(
                description = COALESCE($4, description),
                updated_at  = NOW()
              WHERE id = $1 AND team_id = $2
-             RETURNING id, name, description, created_at, updated_at",
+             RETURNING id, name, description, is_all, created_at, updated_at",
             &[&role_id, &team_id, &name, &description],
         )
         .await
@@ -1772,17 +1826,29 @@ pub async fn update_team_role(
 }
 
 /// Delete a team role. Cascades to remove all member assignments for that role.
+/// The built-in "All" role cannot be deleted.
 pub async fn delete_team_role(pool: &Pool, team_id: Uuid, role_id: Uuid) -> Result<(), AppError> {
     let client = pool.get().await?;
-    let deleted = client
+    let role_row = client
+        .query_opt(
+            "SELECT is_all FROM team_roles WHERE id = $1 AND team_id = $2",
+            &[&role_id, &team_id],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let is_all: bool = role_row.get("is_all");
+    if is_all {
+        return Err(AppError::Validation(
+            "the \"All\" role cannot be deleted".into(),
+        ));
+    }
+
+    client
         .execute(
             "DELETE FROM team_roles WHERE id = $1 AND team_id = $2",
             &[&role_id, &team_id],
         )
         .await?;
-    if deleted == 0 {
-        return Err(AppError::NotFound);
-    }
     Ok(())
 }
 
@@ -1823,7 +1889,9 @@ pub async fn assign_member_role(
     Ok(())
 }
 
-/// Remove a team role assignment from a member.
+/// Remove a team role assignment from a member. The "All" role always mirrors team
+/// membership and cannot be manually unassigned — it is only removed when the member
+/// is removed from the team (or the team/user is deleted), via FK cascade.
 pub async fn unassign_member_role(
     pool: &Pool,
     team_id: Uuid,
@@ -1831,6 +1899,20 @@ pub async fn unassign_member_role(
     role_id: Uuid,
 ) -> Result<(), AppError> {
     let client = pool.get().await?;
+    let role_row = client
+        .query_opt(
+            "SELECT is_all FROM team_roles WHERE id = $1 AND team_id = $2",
+            &[&role_id, &team_id],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let is_all: bool = role_row.get("is_all");
+    if is_all {
+        return Err(AppError::Validation(
+            "the \"All\" role cannot be manually unassigned".into(),
+        ));
+    }
+
     let deleted = client
         .execute(
             "DELETE FROM team_member_roles tmr
@@ -2102,6 +2184,7 @@ fn row_to_team_role(row: &tokio_postgres::Row) -> TeamRoleResponse {
         id: row.get("id"),
         name: row.get("name"),
         description: row.get("description"),
+        is_all: row.get("is_all"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }

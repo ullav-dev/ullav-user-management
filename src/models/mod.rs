@@ -374,6 +374,9 @@ pub struct TeamRoleResponse {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    /// True for the built-in "All" role (every team member) — cannot be deleted or
+    /// manually unassigned, though it can be renamed.
+    pub is_all: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

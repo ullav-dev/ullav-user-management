@@ -684,3 +684,111 @@ pub async fn retire_oauth2_key(
     log::info!("OAuth2: retired signing key — kid: {kid}");
     Ok(HttpResponse::Ok().json(serde_json::json!({ "kid": kid, "status": "retired" })))
 }
+
+// ── OAuth2 service clients (client_credentials grant) ────────────────────────
+//
+// Provisions confidential clients for unattended (machine-to-machine) callers —
+// e.g. an AWE automated task calling a first-party MCP server with no human
+// present to complete an interactive login. See migration 024 and
+// `handlers::oauth2::client_credentials_grant`.
+
+#[derive(Debug, Deserialize)]
+pub struct CreateServiceClientRequest {
+    /// e.g. "awe-automation-cunav" — one per integration purpose, not shared.
+    pub client_id: String,
+    pub client_name: String,
+    /// Scopes this client may request at token time (subset enforced at grant).
+    pub allowed_scopes: Vec<String>,
+    /// Reuse an existing service-account user (e.g. one shared "AWE Automation"
+    /// bot identity across several per-product clients). If omitted, a new
+    /// service-account user is created with the given email/username and a
+    /// generated, never-exposed password (so it can't log in interactively).
+    pub service_account_user_id: Option<Uuid>,
+    pub service_account_email: Option<String>,
+    pub service_account_username: Option<String>,
+}
+
+/// `POST /admin/oauth2/service-clients` — provision a confidential client for
+/// the `client_credentials` grant. Returns the raw client secret **once** —
+/// it is never retrievable again (only its Argon2 hash is stored).
+#[post("/service-clients")]
+pub async fn create_service_client(
+    state: web::Data<AppState>,
+    body: web::Json<CreateServiceClientRequest>,
+) -> Result<HttpResponse, AppError> {
+    let service_account_user_id = match body.service_account_user_id {
+        Some(id) => id,
+        None => {
+            let email = body.service_account_email.as_deref().ok_or_else(|| {
+                AppError::Validation(
+                    "service_account_email required when service_account_user_id is omitted".into(),
+                )
+            })?;
+            let username = body.service_account_username.as_deref().ok_or_else(|| {
+                AppError::Validation(
+                    "service_account_username required when service_account_user_id is omitted".into(),
+                )
+            })?;
+            // Random, never-exposed password — the account is only ever reached
+            // via client_credentials, never via POST /auth/login.
+            let unusable_password_hash = hash_password(&crate::utils::password::generate_secure_token())?;
+            let user = db::admin_create_user(
+                &state.pool, email, username, &unusable_password_hash, None, None,
+            ).await?;
+            user.id
+        }
+    };
+
+    let raw_secret = crate::utils::password::generate_secure_token();
+    let secret_hash = hash_password(&raw_secret)?;
+
+    db::oauth2::create_service_client(
+        &state.pool,
+        &body.client_id,
+        &body.client_name,
+        &body.allowed_scopes,
+        service_account_user_id,
+        &secret_hash,
+    ).await?;
+
+    log::info!(
+        "OAuth2: provisioned service client {:?} (service account {service_account_user_id})",
+        body.client_id,
+    );
+
+    Ok(HttpResponse::Created().json(serde_json::json!({
+        "client_id": body.client_id,
+        "client_secret": raw_secret,
+        "service_account_user_id": service_account_user_id,
+        "warning": "client_secret is shown once and cannot be retrieved again — store it in the target secret port now",
+    })))
+}
+
+/// `GET /admin/oauth2/service-clients` — list provisioned service clients (no secrets).
+#[get("/service-clients")]
+pub async fn list_service_clients(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+    let clients = db::oauth2::list_service_clients(&state.pool).await?;
+    Ok(HttpResponse::Ok().json(
+        clients
+            .into_iter()
+            .map(|(client_id, client_name, allowed_scopes, service_account_user_id)| {
+                serde_json::json!({
+                    "client_id": client_id,
+                    "client_name": client_name,
+                    "allowed_scopes": allowed_scopes,
+                    "service_account_user_id": service_account_user_id,
+                })
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// `DELETE /admin/oauth2/service-clients/{client_id}` — revoke a service client.
+#[delete("/service-clients/{client_id}")]
+pub async fn delete_service_client(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    db::oauth2::delete_service_client(&state.pool, &path.into_inner()).await?;
+    Ok(HttpResponse::NoContent().finish())
+}

@@ -384,6 +384,7 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::auth::change_password)
                     .service(handlers::profile::get_me)
                     .service(handlers::profile::update_me)
+                    .service(handlers::users::resolve_users)
                     .service(handlers::user_ai_settings::get_ai_settings)
                     .service(handlers::user_ai_settings::upsert_ai_settings)
                     .service(handlers::user_ai_settings::delete_ai_settings)

@@ -1,4 +1,6 @@
 pub mod oauth2;
+pub mod pat;
+pub mod ssh_keys;
 
 use crate::errors::AppError;
 use crate::models::{

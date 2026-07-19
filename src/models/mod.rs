@@ -573,3 +573,144 @@ pub struct PasswordResetToken {
     #[allow(dead_code)]
     pub created_at: DateTime<Utc>,
 }
+
+// ── Git credential scopes (shared by PATs and SSH keys) ──────────────────────
+
+/// The only scopes a git credential (PAT or SSH key) may be granted. Enforced
+/// on creation — anything else is rejected with `AppError::Validation`.
+pub const VALID_GIT_SCOPES: &[&str] = &["repo:read", "repo:write"];
+
+/// Validate a requested scope list against `VALID_GIT_SCOPES`, defaulting to
+/// full read+write access when none is supplied (the credential is then only
+/// as powerful as the account itself — restricting it further is opt-in).
+pub fn validate_git_scopes(requested: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let scopes = requested.unwrap_or_else(|| {
+        VALID_GIT_SCOPES.iter().map(|s| s.to_string()).collect()
+    });
+    if scopes.is_empty() {
+        return Err("scopes must not be empty — omit the field entirely for the default (full access)".into());
+    }
+    for s in &scopes {
+        if !VALID_GIT_SCOPES.contains(&s.as_str()) {
+            return Err(format!(
+                "invalid scope {s:?} — must be one of {VALID_GIT_SCOPES:?}"
+            ));
+        }
+    }
+    Ok(scopes)
+}
+
+// ── Personal access tokens (git-over-HTTPS) ───────────────────────────────────
+
+/// Request body for `POST /pat`.
+#[derive(Debug, Deserialize)]
+pub struct CreatePatRequest {
+    pub name: String,
+    /// Defaults to full access (`["repo:read", "repo:write"]`) when omitted.
+    pub scopes: Option<Vec<String>>,
+    /// `None` = no expiry (still revocable at any time via `DELETE /pat/{id}`).
+    pub expires_in_days: Option<i64>,
+}
+
+/// A PAT as returned by list/audit endpoints — never includes the raw token
+/// or its hash.
+#[derive(Debug, Clone, Serialize)]
+pub struct PatSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub token_prefix: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Response for `POST /pat` — the only time the raw token is ever returned.
+#[derive(Debug, Serialize)]
+pub struct CreatePatResponse {
+    pub id: Uuid,
+    /// Shown once. Store it now — it cannot be retrieved again.
+    pub token: String,
+    pub name: String,
+    pub token_prefix: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Admin audit view of a PAT — owner identity included, secret material never is.
+#[derive(Debug, Serialize)]
+pub struct AdminPatSummary {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub username: String,
+    pub name: String,
+    pub token_prefix: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+// ── SSH public keys (git-over-SSH) ────────────────────────────────────────────
+
+/// Request body for `POST /ssh-keys`.
+#[derive(Debug, Deserialize)]
+pub struct CreateSshKeyRequest {
+    pub name: String,
+    /// Full OpenSSH public key line, e.g. `"ssh-ed25519 AAAA... comment"`.
+    pub public_key: String,
+    /// Defaults to full access (`["repo:read", "repo:write"]`) when omitted.
+    pub scopes: Option<Vec<String>>,
+}
+
+/// An SSH key as returned by list/audit endpoints — the public key material
+/// itself is not secret and is included, but ownership/ACL data never crosses
+/// into anything resembling a private key (which this table never stores).
+#[derive(Debug, Clone, Serialize)]
+pub struct SshKeySummary {
+    pub id: Uuid,
+    pub name: String,
+    pub fingerprint: String,
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Admin audit view of an SSH key — owner identity included.
+#[derive(Debug, Serialize)]
+pub struct AdminSshKeySummary {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub username: String,
+    pub name: String,
+    pub fingerprint: String,
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+// ── Git credential exchange (internal — called by lagan-server, not humans) ──
+
+/// Request body for `POST /pat/exchange` and `POST /ssh-keys/resolve`.
+///
+/// `resource` is an RFC 8707 resource indicator — the canonical URI of the
+/// lagan-server instance that will validate the minted token, matching the
+/// convention already used by the OAuth2 `resource` parameter elsewhere in
+/// this service. `credential` is the raw PAT string or, for the SSH variant,
+/// the key's `SHA256:...` fingerprint.
+#[derive(Debug, Deserialize)]
+pub struct ExchangeGitCredentialRequest {
+    pub credential: String,
+    pub resource: String,
+}
+
+/// Response for both exchange endpoints.
+#[derive(Debug, Serialize)]
+pub struct GitAccessTokenResponse {
+    pub access_token: String,
+    pub token_type: &'static str,
+    pub expires_in: i64,
+}

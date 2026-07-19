@@ -63,6 +63,12 @@ pub struct AppState {
     pub token_rate_limiter: RateLimiter,
     /// Rate limiter for /oauth2/register: max 10 registrations per IP per hour.
     pub register_rate_limiter: RateLimiter,
+    /// Shared secret required (via `X-Git-Service-Secret`) on `/pat/exchange`
+    /// and `/ssh-keys/resolve` — both accept a raw credential instead of a
+    /// Bearer JWT, so without this gate they'd be an open "is this token
+    /// valid" oracle on a publicly reachable listener. `None` (unset) leaves
+    /// the gate open — fine for local dev, not for production.
+    pub git_service_shared_secret: Option<String>,
 }
 
 #[actix_web::main]
@@ -274,6 +280,15 @@ async fn main() -> std::io::Result<()> {
 
     let http_client = reqwest::Client::new();
 
+    let git_service_shared_secret = resolve_secret("GIT_SERVICE_SHARED_SECRET");
+    if git_service_shared_secret.is_none() {
+        log::warn!(
+            "GIT_SERVICE_SHARED_SECRET not set — /pat/exchange and /ssh-keys/resolve are \
+             callable by anyone on the network, not just lagan-server; set this in any \
+             deployment where these endpoints are reachable outside a trusted service mesh"
+        );
+    }
+
     let state = web::Data::new(AppState {
         pool,
         jwt_secret: jwt_secret.clone(),
@@ -293,6 +308,7 @@ async fn main() -> std::io::Result<()> {
         oauth2_issuer,
         token_rate_limiter: RateLimiter::new(20, std::time::Duration::from_secs(60)),
         register_rate_limiter: RateLimiter::new(10, std::time::Duration::from_secs(3600)),
+        git_service_shared_secret,
     });
 
     log::info!("Starting server on {}:{}", host, port);
@@ -342,7 +358,13 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::oauth2::authorize_get)
             .service(handlers::oauth2::authorize_post)
             .service(handlers::oauth2::token)
-            .service(handlers::oauth2::revoke);
+            .service(handlers::oauth2::revoke)
+            // Git credential exchange — the credential itself (PAT / SSH key
+            // fingerprint) is the auth, not a Bearer JWT, so these are
+            // unauthenticated at the actix-web level and instead gated by
+            // `check_service_secret` inside each handler.
+            .service(handlers::pat::exchange)
+            .service(handlers::ssh_keys::resolve);
 
         if enable_docs {
             app = app
@@ -368,6 +390,15 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::subscriptions::get_current_subscription)
                     .service(handlers::subscriptions::create_checkout_session)
                     .service(handlers::subscriptions::create_portal_session)
+                    // Personal access tokens & SSH keys — self-service, no
+                    // permission beyond being authenticated (ownership checks
+                    // happen inside each handler).
+                    .service(handlers::pat::create_pat)
+                    .service(handlers::pat::list_pats)
+                    .service(handlers::pat::revoke_pat)
+                    .service(handlers::ssh_keys::create_ssh_key)
+                    .service(handlers::ssh_keys::list_ssh_keys)
+                    .service(handlers::ssh_keys::delete_ssh_key)
                     // Teams — permission-checked inside handlers; invite accept/decline registered
                     // before /{id} routes so static "invitations" segment wins over UUID param.
                     .service(handlers::teams::list_my_teams)
@@ -431,6 +462,21 @@ async fn main() -> std::io::Result<()> {
                             .service(handlers::admin::create_service_client)
                             .service(handlers::admin::list_service_clients)
                             .service(handlers::admin::delete_service_client),
+                    )
+                    // Git credential audit (all users' PATs/SSH keys) — requires
+                    // `git_credentials:manage`, distinct from `users:read`. Registered
+                    // BEFORE the broader `/admin` scope below for the same reason as
+                    // `/admin/oauth2` above: actix-web commits to the first matching
+                    // scope prefix and won't fall through to a sibling scope.
+                    .service(
+                        web::scope("/admin/git-credentials")
+                            .wrap(middleware::auth::AuthMiddleware::require(
+                                jwt_secret.clone(),
+                                oauth2_keys_middleware.clone(),
+                                "git_credentials:manage",
+                            ))
+                            .service(handlers::pat::admin_list_pats)
+                            .service(handlers::ssh_keys::admin_list_ssh_keys),
                     )
                     // Admin user/role/subscription/team management — requires `users:read`
                     .service(

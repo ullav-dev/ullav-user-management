@@ -203,6 +203,80 @@ pub fn create_jwt_rs256(
     .map_err(|e| AppError::Jwt(e.to_string()))
 }
 
+/// Claims for a short-lived JWT exchanged from a git credential (a personal
+/// access token or an SSH public key — see `handlers::pat`/`handlers::ssh_keys`).
+///
+/// Deliberately shaped identically to `ullav_mcp_auth::validator::McpClaims`
+/// (`iss`/`sub`/`aud`/`iat`/`exp`/`scope`/`client_id`/`username`/`roles`/
+/// `subscriptions`/`teams`) rather than reusing plain `Claims`, so that any
+/// service already depending on `ullav-mcp-auth` (as `awe-server` does) can
+/// validate this token with the exact same `TokenValidator::validate()` call
+/// it uses for MCP OAuth2 tokens — including the `aud` check, which plain
+/// `Claims`-shaped tokens never carry. `client_id` is set to a fixed constant
+/// identifying the credential type (`"lagan-pat"` / `"lagan-ssh"`), not a real
+/// OAuth2 client — it exists purely so the JSON shape matches `McpClaims` and
+/// downstream audit logs can distinguish which credential minted the token.
+///
+/// `scope` carries the *credential's* own scope restriction (space-separated,
+/// e.g. `"repo:read"`), which callers must enforce in addition to — not
+/// instead of — the account's normal team/role permissions: a read-only PAT
+/// must not grant write access even if the account otherwise could.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitAccessClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub scope: String,
+    pub client_id: String,
+    pub username: String,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub subscriptions: HashMap<String, SubscriptionClaim>,
+    #[serde(default)]
+    pub teams: HashMap<String, TeamClaim>,
+}
+
+/// Mint a short-lived `GitAccessClaims` token for a resolved git credential.
+///
+/// `resource` is the caller-supplied audience (RFC 8707 resource indicator,
+/// same convention as the OAuth2 `resource` parameter) — the canonical URI of
+/// the lagan-server instance that will validate this token, so a token minted
+/// for one resource server can't be replayed against another.
+#[allow(clippy::too_many_arguments)]
+pub fn create_git_access_jwt(
+    user_id: Uuid,
+    username: String,
+    issuer: &str,
+    resource: &str,
+    client_id: &str,
+    ttl_minutes: i64,
+    scope: &str,
+    roles: Vec<String>,
+    subscriptions: HashMap<String, SubscriptionClaim>,
+    teams: HashMap<String, TeamClaim>,
+    key: &crate::utils::rs256::RsaKeyPair,
+) -> Result<String, AppError> {
+    let now = Utc::now();
+    let claims = GitAccessClaims {
+        iss: issuer.to_owned(),
+        sub: user_id.to_string(),
+        aud: resource.to_owned(),
+        iat: now.timestamp(),
+        exp: (now + Duration::minutes(ttl_minutes)).timestamp(),
+        scope: scope.to_owned(),
+        client_id: client_id.to_owned(),
+        username,
+        roles,
+        subscriptions,
+        teams,
+    };
+    encode(&key.jwt_header(), &claims, key.encoding_key())
+        .map_err(|e| AppError::Jwt(e.to_string()))
+}
+
 /// Decode and validate a JWT, returning the embedded claims.
 pub fn decode_jwt(token: &str, secret: &str) -> Result<Claims, AppError> {
     decode::<Claims>(

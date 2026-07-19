@@ -6,6 +6,25 @@ pub mod key_store;
 pub mod password;
 pub mod rate_limit;
 pub mod rs256;
+pub mod token;
+
+/// Check an internal-service shared-secret header (e.g. the header lagan-server
+/// sends when calling `/pat/exchange` or `/ssh-keys/resolve`) against the
+/// configured expected value.
+///
+/// When `configured` is `None` (the env var isn't set), the gate is open —
+/// acceptable for local/dev, but any production deployment exposing these
+/// endpoints on a reachable network must set the corresponding secret.
+pub fn check_service_secret(
+    configured: &Option<String>,
+    provided: Option<&str>,
+) -> Result<(), crate::errors::AppError> {
+    match (configured, provided) {
+        (None, _) => Ok(()),
+        (Some(expected), Some(got)) if expected == got => Ok(()),
+        _ => Err(crate::errors::AppError::Forbidden),
+    }
+}
 
 /// Resolve a secret value, preferring the Docker-secrets `_FILE` convention.
 ///

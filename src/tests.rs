@@ -611,6 +611,7 @@ mod handler_tests {
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(
                 1000, std::time::Duration::from_secs(3600),
             ),
+            git_service_shared_secret: None,
         })
     }
 
@@ -699,6 +700,7 @@ mod health_tests {
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(
                 1000, std::time::Duration::from_secs(3600),
             ),
+            git_service_shared_secret: None,
         })
     }
 
@@ -799,6 +801,7 @@ mod app_url_handler_tests {
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(
                 1000, std::time::Duration::from_secs(3600),
             ),
+            git_service_shared_secret: None,
         })
     }
 
@@ -1321,6 +1324,7 @@ mod oauth2_key_rotation_tests {
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(
                 1000, std::time::Duration::from_secs(3600),
             ),
+            git_service_shared_secret: None,
         });
         (state, kid1, kid2)
     }
@@ -1353,6 +1357,7 @@ mod oauth2_key_rotation_tests {
             oauth2_issuer: "http://localhost:8081".into(),
             token_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(60)),
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(3600)),
+            git_service_shared_secret: None,
         });
         let app = test::init_service(App::new().app_data(state).service(list_oauth2_keys)).await;
         let req = test::TestRequest::get().uri("/keys").to_request();
@@ -1387,6 +1392,7 @@ mod oauth2_key_rotation_tests {
             oauth2_issuer: "http://localhost:8081".into(),
             token_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(60)),
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(3600)),
+            git_service_shared_secret: None,
         });
         let app = test::init_service(App::new().app_data(state).service(generate_oauth2_key)).await;
         let req = test::TestRequest::post().uri("/keys/generate").to_request();
@@ -1419,6 +1425,7 @@ mod oauth2_key_rotation_tests {
             oauth2_issuer: "http://localhost:8081".into(),
             token_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(60)),
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(3600)),
+            git_service_shared_secret: None,
         });
         let app = test::init_service(App::new().app_data(state).service(promote_oauth2_key)).await;
         let req = test::TestRequest::post()
@@ -1497,6 +1504,7 @@ mod oauth2_key_rotation_tests {
             oauth2_issuer: "http://localhost:8081".into(),
             token_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(60)),
             register_rate_limiter: crate::utils::rate_limit::RateLimiter::new(1000, std::time::Duration::from_secs(3600)),
+            git_service_shared_secret: None,
         });
         let app = test::init_service(App::new().app_data(state).service(retire_oauth2_key)).await;
         // "unknownkid" is not the primary, so it passes the guard and reaches the DB.

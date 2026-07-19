@@ -33,6 +33,8 @@ tags:
     description: Team creation and membership (JWT required)
   - name: Admin
     description: Administrative management (requires `users:read` permission)
+  - name: Git Credentials
+    description: Personal access tokens and SSH keys for git-over-HTTPS/SSH access (lagan)
 
 paths:
 
@@ -801,6 +803,294 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /pat:
+    get:
+      summary: List my personal access tokens
+      description: Never includes the raw token or its hash — only metadata plus the short display prefix shown at creation.
+      operationId: listMyPats
+      tags: [Git Credentials]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Array of PAT summaries (may be empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PatSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: Create a personal access token
+      description: |
+        Used for git-over-HTTPS Basic auth (username is ignored by convention; the token is the password).
+        The raw token is returned once in this response and is never retrievable again — store it immediately.
+        `scopes` defaults to full access (`["repo:read", "repo:write"]`) when omitted.
+      operationId: createPat
+      tags: [Git Credentials]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePatRequest'
+            example:
+              name: laptop
+              scopes: [repo:read, repo:write]
+              expires_in_days: 90
+      responses:
+        '201':
+          description: PAT created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePatResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /pat/{id}:
+    delete:
+      summary: Revoke a personal access token
+      description: Ownership-scoped — only the owning user may revoke their own token.
+      operationId: revokePat
+      tags: [Git Credentials]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/patId'
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /pat/exchange:
+    post:
+      summary: Exchange a raw PAT for a short-lived access token
+      description: |
+        Internal endpoint — called by lagan-server (or any other service accepting git-over-HTTPS
+        credentials), never by a human directly. The PAT itself is the credential, so this endpoint
+        is unauthenticated at the Bearer-token level and instead gated by an optional shared-secret
+        header, `X-Git-Service-Secret`, checked against the `GIT_SERVICE_SHARED_SECRET` env var
+        (open when unset — only acceptable for local/dev deployments).
+
+        `resource` is an RFC 8707 resource indicator: the canonical URI of the resource server that
+        will validate the minted token, so it can't be replayed against a different service.
+      operationId: exchangePat
+      tags: [Git Credentials]
+      parameters:
+        - name: X-Git-Service-Secret
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Required when GIT_SERVICE_SHARED_SECRET is configured on the server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExchangeGitCredentialRequest'
+            example:
+              credential: lgn_pat_a1b2c3...
+              resource: https://lagan.example.com
+      responses:
+        '200':
+          description: Short-lived access token bound to the requested resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitAccessTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ssh-keys:
+    get:
+      summary: List my registered SSH public keys
+      operationId: listMySshKeys
+      tags: [Git Credentials]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Array of SSH key summaries (may be empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SshKeySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: Register an SSH public key
+      description: |
+        Used for git-over-SSH publickey auth. `public_key` must be a single well-formed OpenSSH
+        public key line (e.g. `ssh-ed25519 AAAA... comment`); its `SHA256:...` fingerprint is
+        computed server-side and used to look the key up at SSH connection time.
+        `scopes` defaults to full access (`["repo:read", "repo:write"]`) when omitted.
+      operationId: createSshKey
+      tags: [Git Credentials]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSshKeyRequest'
+            example:
+              name: laptop
+              public_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... me@laptop'
+              scopes: [repo:read, repo:write]
+      responses:
+        '201':
+          description: SSH key registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SshKeySummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ssh-keys/{id}:
+    delete:
+      summary: Remove a registered SSH key
+      description: Ownership-scoped — only the owning user may remove their own key.
+      operationId: deleteSshKey
+      tags: [Git Credentials]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/sshKeyId'
+      responses:
+        '204':
+          description: Key removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ssh-keys/resolve:
+    post:
+      summary: Resolve an SSH key fingerprint to a short-lived access token
+      description: |
+        Internal endpoint — called by lagan-server's embedded SSH server at connection-auth time,
+        never by a human directly. Same shared-secret gating and RFC 8707 `resource` binding as
+        `POST /pat/exchange`; the only difference is the credential is a fingerprint the caller
+        already computed from the offered SSH key, not a bearer secret.
+      operationId: resolveSshKey
+      tags: [Git Credentials]
+      parameters:
+        - name: X-Git-Service-Secret
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Required when GIT_SERVICE_SHARED_SECRET is configured on the server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExchangeGitCredentialRequest'
+            example:
+              credential: 'SHA256:abcdef1234567890...'
+              resource: https://lagan.example.com
+      responses:
+        '200':
+          description: Short-lived access token bound to the requested resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitAccessTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/git-credentials/pats:
+    get:
+      summary: Audit view of every personal access token, across every user
+      description: Requires the `git_credentials:manage` permission. Never includes raw tokens or hashes.
+      operationId: adminListPats
+      tags: [Admin, Git Credentials]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Array of PAT audit summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminPatSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/git-credentials/ssh-keys:
+    get:
+      summary: Audit view of every registered SSH key, across every user
+      description: Requires the `git_credentials:manage` permission.
+      operationId: adminListSshKeys
+      tags: [Admin, Git Credentials]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Array of SSH key audit summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminSshKeySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -824,6 +1114,22 @@ components:
       schema:
         type: string
       description: 64-character hex invitation token from the invitation email
+    patId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID of the personal access token
+    sshKeyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID of the SSH key
 
   schemas:
 
@@ -1222,6 +1528,154 @@ components:
           type: string
           format: uuid
           description: UUID of the user to add directly as an active member
+
+    CreatePatRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: User-facing label, e.g. "laptop"
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [repo:read, repo:write]
+          description: Defaults to full access (both scopes) when omitted
+        expires_in_days:
+          type: integer
+          format: int64
+          nullable: true
+          description: Omit or null for no expiry (still revocable at any time)
+
+    PatSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        token_prefix:
+          type: string
+          description: First few characters of the raw token, shown so the user can tell tokens apart
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreatePatResponse:
+      allOf:
+        - $ref: '#/components/schemas/PatSummary'
+        - type: object
+          properties:
+            token:
+              type: string
+              description: The raw token. Shown once — it cannot be retrieved again.
+
+    AdminPatSummary:
+      allOf:
+        - $ref: '#/components/schemas/PatSummary'
+        - type: object
+          properties:
+            user_id:
+              type: string
+              format: uuid
+            username:
+              type: string
+
+    CreateSshKeyRequest:
+      type: object
+      required: [name, public_key]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: User-facing label, e.g. "laptop"
+        public_key:
+          type: string
+          description: Full OpenSSH public key line, e.g. "ssh-ed25519 AAAA... comment"
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [repo:read, repo:write]
+          description: Defaults to full access (both scopes) when omitted
+
+    SshKeySummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        fingerprint:
+          type: string
+          description: 'SHA256:... fingerprint, same format as `ssh-keygen -lf`'
+        scopes:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    AdminSshKeySummary:
+      allOf:
+        - $ref: '#/components/schemas/SshKeySummary'
+        - type: object
+          properties:
+            user_id:
+              type: string
+              format: uuid
+            username:
+              type: string
+
+    ExchangeGitCredentialRequest:
+      type: object
+      required: [credential, resource]
+      properties:
+        credential:
+          type: string
+          description: The raw PAT, or (for SSH) the key's SHA256:... fingerprint
+        resource:
+          type: string
+          format: uri
+          description: RFC 8707 resource indicator — canonical URI of the resource server that will validate the token
+
+    GitAccessTokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          format: int64
+          description: Seconds until expiry
 
   responses:
     BadRequest:

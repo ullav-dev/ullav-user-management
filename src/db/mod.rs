@@ -90,6 +90,33 @@ pub async fn admin_create_user(
     Ok(row_to_user(&row))
 }
 
+/// Public identity fields returned by `GET /users/resolve` — deliberately
+/// narrower than `User`/`UserResponse` (no email, no timestamps): just
+/// enough to render a name and avatar.
+#[derive(Debug, serde::Serialize)]
+pub struct ResolvedUser {
+    pub id: Uuid,
+    pub username: String,
+    pub avatar_url: Option<String>,
+}
+
+/// Resolve a batch of user ids to their public username/avatar. Ids with no
+/// matching row are simply omitted from the result, not an error.
+pub async fn resolve_users(pool: &Pool, ids: &[Uuid]) -> Result<Vec<ResolvedUser>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query("SELECT id, username, avatar_url FROM users WHERE id = ANY($1)", &[&ids])
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| ResolvedUser {
+            id: r.get("id"),
+            username: r.get("username"),
+            avatar_url: r.get("avatar_url"),
+        })
+        .collect())
+}
+
 /// Fetch a user by their UUID.
 pub async fn get_user_by_id(pool: &Pool, id: Uuid) -> Result<User, AppError> {
     let client = pool.get().await?;

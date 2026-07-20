@@ -124,6 +124,41 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /users/resolve:
+    get:
+      summary: Resolve a batch of user ids to their public username/avatar
+      description: |
+        Open to any authenticated user (not admin-gated) — callers displaying
+        authorship for content that already reveals a user's identity indirectly
+        (e.g. lagan's PR/comment/CI-run authorship, sourced from git commit
+        authorship) use this instead of `/admin/users`. Returns only `username`
+        and `avatar_url`, never email or other account details. Unparsable or
+        unknown ids are silently omitted from the result, not an error.
+      operationId: resolveUsers
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Comma-separated user UUIDs (up to 200; extras beyond that are ignored)
+      responses:
+        '200':
+          description: Resolved users (only ids that exist)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ResolvedUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /users/{id}/password:
     put:
       summary: Change a user's password
@@ -1260,6 +1295,18 @@ components:
         new_password:
           type: string
           minLength: 8
+
+    ResolvedUser:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        avatar_url:
+          type: string
+          nullable: true
 
     UserResponse:
       type: object

@@ -9,8 +9,9 @@ use crate::{
     },
     AppState,
 };
-use actix_web::{post, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use chrono::{Duration, Utc};
+use uuid::Uuid;
 
 /// `POST /users` — Create a new (inactive) user account and return a confirmation token.
 #[post("/users")]
@@ -67,4 +68,37 @@ pub async fn create_user(
         "message": "Account created. Use the confirmation token to activate your account.",
         "confirmation_token": token
     })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ResolveUsersQuery {
+    /// Comma-separated user UUIDs. Unparsable/unknown ids are silently
+    /// dropped rather than erroring — callers scan free text (e.g. commit
+    /// authorship) for ids that may not resolve to anything.
+    pub ids: String,
+}
+
+/// `GET /users/resolve?ids=<uuid,uuid,...>` — resolve a batch of user ids to
+/// their public username/avatar. Deliberately open to any authenticated
+/// user (not admin-gated, unlike `/admin/users`): every caller needing this
+/// (lagan's PR/comment/CI-run authorship display, and any similar future
+/// use) already sees these users' identity indirectly anyway (e.g. via git
+/// commit authorship), so this exposes no new information — only
+/// `username`/`avatar_url`, never email or other account details.
+#[get("/users/resolve")]
+pub async fn resolve_users(
+    state: web::Data<AppState>,
+    query: web::Query<ResolveUsersQuery>,
+) -> Result<HttpResponse, AppError> {
+    let ids: Vec<Uuid> = query
+        .ids
+        .split(',')
+        .filter_map(|s| s.trim().parse::<Uuid>().ok())
+        .take(200)
+        .collect();
+    if ids.is_empty() {
+        return Ok(HttpResponse::Ok().json(Vec::<db::ResolvedUser>::new()));
+    }
+    let users = db::resolve_users(&state.pool, &ids).await?;
+    Ok(HttpResponse::Ok().json(users))
 }

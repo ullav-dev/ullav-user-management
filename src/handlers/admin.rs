@@ -446,6 +446,7 @@ pub async fn update_team(
         &state.pool,
         *path,
         body.name.as_deref(),
+        body.slug.as_deref(),
         body.description.as_deref(),
         body.purpose.as_deref(),
         body.avatar_url.as_deref(),

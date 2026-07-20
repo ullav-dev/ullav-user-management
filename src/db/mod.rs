@@ -5,9 +5,9 @@ pub mod ssh_keys;
 use crate::errors::AppError;
 use crate::models::{
     AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
-    Subscription, SubscriptionsPage, TeamMemberResponse, TeamMemberRow, TeamProductAccessResponse,
-    TeamProductRef, TeamResponse, TeamRoleResponse, TeamSummary, TeamUserRef, TeamsPage, User,
-    UserTeamAccess, UserWithRoles, UsersPage,
+    Subscription, SubscriptionsPage, TeamLookup, TeamMemberResponse, TeamMemberRow,
+    TeamProductAccessResponse, TeamProductRef, TeamResponse, TeamRoleResponse, TeamSummary,
+    TeamUserRef, TeamsPage, User, UserTeamAccess, UserWithRoles, UsersPage,
 };
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
@@ -1197,6 +1197,132 @@ pub async fn delete_plan(pool: &Pool, id: Uuid) -> Result<(), AppError> {
 
 // ── Teams ─────────────────────────────────────────────────────────────────────
 
+/// Derive a URL-safe slug from a display name: lowercase, runs of
+/// non-alphanumerics collapsed to a single hyphen, leading/trailing hyphens
+/// trimmed. Mirrors the backfill logic in migrations/029_team_slugs.sql —
+/// keep the two in sync if either changes.
+fn slugify(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut last_was_hyphen = true; // suppresses a leading hyphen
+    for ch in name.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_hyphen = false;
+        } else if !last_was_hyphen {
+            slug.push('-');
+            last_was_hyphen = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+/// Validate a user-supplied slug (as opposed to one auto-derived via
+/// `slugify`): lowercase ASCII alphanumerics and single hyphens only, no
+/// leading/trailing/doubled hyphens, non-empty.
+fn validate_slug_format(slug: &str) -> Result<(), AppError> {
+    let valid = !slug.is_empty()
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+        && !slug.contains("--")
+        && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "slug must be lowercase letters, numbers, and single hyphens only".into(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod team_slug_tests {
+    use super::*;
+
+    #[test]
+    fn slugify_lowercases_and_collapses_punctuation() {
+        assert_eq!(slugify("Setanta Dev"), "setanta-dev");
+        assert_eq!(slugify("Belfield Grads!!"), "belfield-grads");
+        assert_eq!(slugify("  leading/trailing  "), "leading-trailing");
+        assert_eq!(slugify("a---b"), "a-b");
+    }
+
+    #[test]
+    fn slugify_empty_for_all_punctuation_name() {
+        // The migration's SQL backfill and unique_team_slug's Rust-side base
+        // both special-case an empty slugify() result — this just documents
+        // that slugify itself intentionally returns "" rather than guessing
+        // a fallback (the caller decides the fallback: "team-<id>" in SQL,
+        // "team" in unique_team_slug).
+        assert_eq!(slugify("!!!"), "");
+        assert_eq!(slugify("---"), "");
+    }
+
+    #[test]
+    fn validate_slug_format_accepts_valid_slugs() {
+        assert!(validate_slug_format("setanta-dev").is_ok());
+        assert!(validate_slug_format("team2").is_ok());
+        assert!(validate_slug_format("a").is_ok());
+    }
+
+    #[test]
+    fn validate_slug_format_rejects_invalid_slugs() {
+        assert!(validate_slug_format("").is_err());
+        assert!(validate_slug_format("-leading").is_err());
+        assert!(validate_slug_format("trailing-").is_err());
+        assert!(validate_slug_format("double--hyphen").is_err());
+        assert!(validate_slug_format("Uppercase").is_err());
+        assert!(validate_slug_format("has_underscore").is_err());
+        assert!(validate_slug_format("has space").is_err());
+    }
+}
+
+/// Find a slug derived from `name` that isn't already taken, appending
+/// `-2`, `-3`, ... on collision (teams.name has no uniqueness constraint,
+/// so collisions are expected, not exceptional). Runs inside the caller's
+/// transaction so the check-then-insert is atomic with the row creation;
+/// the `teams_slug_idx` unique index is still the real safety net for any
+/// races this doesn't catch.
+async fn unique_team_slug(
+    client: &impl deadpool_postgres::GenericClient,
+    name: &str,
+) -> Result<String, AppError> {
+    let base = {
+        let s = slugify(name);
+        if s.is_empty() { "team".to_string() } else { s }
+    };
+    let mut candidate = base.clone();
+    let mut n = 2;
+    loop {
+        let exists = client
+            .query_opt("SELECT 1 FROM teams WHERE slug = $1", &[&candidate])
+            .await?
+            .is_some();
+        if !exists {
+            return Ok(candidate);
+        }
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+}
+
+/// Resolve a team slug to its id/name — used by lagan-server to translate
+/// `{team-slug}/{repo-slug}` clone URLs.
+pub async fn get_team_by_slug(pool: &Pool, slug: &str) -> Result<TeamLookup, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt("SELECT id, slug, name FROM teams WHERE slug = $1", &[&slug])
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(TeamLookup {
+        id: row.get("id"),
+        slug: row.get("slug"),
+        name: row.get("name"),
+    })
+}
+
 /// Create a team and atomically add the owner as the first active member.
 /// Returns the new team's UUID.
 pub async fn create_team(
@@ -1210,12 +1336,14 @@ pub async fn create_team(
     let mut client = pool.get().await?;
     let tx = client.transaction().await?;
 
+    let slug = unique_team_slug(&tx, name).await?;
+
     let row = tx
         .query_one(
-            "INSERT INTO teams (name, description, purpose, avatar_url, owner_id, leader_id)
-             VALUES ($1, $2, $3, $4, $5, $5)
+            "INSERT INTO teams (name, slug, description, purpose, avatar_url, owner_id, leader_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $6)
              RETURNING id",
-            &[&name, &description, &purpose, &avatar_url, &owner_id],
+            &[&name, &slug, &description, &purpose, &avatar_url, &owner_id],
         )
         .await?;
 
@@ -1297,7 +1425,7 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
 
     let team_row = client
         .query_opt(
-            "SELECT t.id, t.name, t.description, t.purpose, t.avatar_url,
+            "SELECT t.id, t.name, t.slug, t.description, t.purpose, t.avatar_url,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -1384,7 +1512,7 @@ pub async fn list_user_teams(pool: &Pool, user_id: Uuid) -> Result<Vec<TeamSumma
     let client = pool.get().await?;
     let rows = client
         .query(
-            "SELECT t.id, t.name, t.description, t.avatar_url,
+            "SELECT t.id, t.name, t.slug, t.description, t.avatar_url,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -1408,28 +1536,51 @@ pub async fn list_user_teams(pool: &Pool, user_id: Uuid) -> Result<Vec<TeamSumma
     Ok(rows.iter().map(row_to_team_summary).collect())
 }
 
+/// Validate a caller-supplied slug and check it isn't already taken by a
+/// different team. Shared by `update_team` and `admin_update_team`.
+async fn check_slug_available(
+    client: &impl deadpool_postgres::GenericClient,
+    slug: &str,
+    team_id: Uuid,
+) -> Result<(), AppError> {
+    validate_slug_format(slug)?;
+    let taken = client
+        .query_opt("SELECT 1 FROM teams WHERE slug = $1 AND id != $2", &[&slug, &team_id])
+        .await?
+        .is_some();
+    if taken {
+        return Err(AppError::Conflict);
+    }
+    Ok(())
+}
+
 /// Update a team's editable fields. Null parameters leave columns unchanged.
 pub async fn update_team(
     pool: &Pool,
     team_id: Uuid,
     name: Option<&str>,
+    slug: Option<&str>,
     description: Option<&str>,
     purpose: Option<&str>,
     avatar_url: Option<&str>,
     leader_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let client = pool.get().await?;
+    if let Some(s) = slug {
+        check_slug_available(&client, s, team_id).await?;
+    }
     let updated = client
         .execute(
             "UPDATE teams SET
                name        = COALESCE($1, name),
-               description = COALESCE($2, description),
-               purpose     = COALESCE($3, purpose),
-               avatar_url  = COALESCE($4, avatar_url),
-               leader_id   = COALESCE($5, leader_id),
+               slug        = COALESCE($2, slug),
+               description = COALESCE($3, description),
+               purpose     = COALESCE($4, purpose),
+               avatar_url  = COALESCE($5, avatar_url),
+               leader_id   = COALESCE($6, leader_id),
                updated_at  = NOW()
-             WHERE id = $6",
-            &[&name, &description, &purpose, &avatar_url, &leader_id, &team_id],
+             WHERE id = $7",
+            &[&name, &slug, &description, &purpose, &avatar_url, &leader_id, &team_id],
         )
         .await?;
     if updated == 0 {
@@ -1443,6 +1594,7 @@ pub async fn admin_update_team(
     pool: &Pool,
     team_id: Uuid,
     name: Option<&str>,
+    slug: Option<&str>,
     description: Option<&str>,
     purpose: Option<&str>,
     avatar_url: Option<&str>,
@@ -1450,18 +1602,22 @@ pub async fn admin_update_team(
     leader_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let client = pool.get().await?;
+    if let Some(s) = slug {
+        check_slug_available(&client, s, team_id).await?;
+    }
     let updated = client
         .execute(
             "UPDATE teams SET
                name        = COALESCE($1, name),
-               description = COALESCE($2, description),
-               purpose     = COALESCE($3, purpose),
-               avatar_url  = COALESCE($4, avatar_url),
-               owner_id    = COALESCE($5, owner_id),
-               leader_id   = COALESCE($6, leader_id),
+               slug        = COALESCE($2, slug),
+               description = COALESCE($3, description),
+               purpose     = COALESCE($4, purpose),
+               avatar_url  = COALESCE($5, avatar_url),
+               owner_id    = COALESCE($6, owner_id),
+               leader_id   = COALESCE($7, leader_id),
                updated_at  = NOW()
-             WHERE id = $7",
-            &[&name, &description, &purpose, &avatar_url, &owner_id, &leader_id, &team_id],
+             WHERE id = $8",
+            &[&name, &slug, &description, &purpose, &avatar_url, &owner_id, &leader_id, &team_id],
         )
         .await?;
     if updated == 0 {
@@ -1748,7 +1904,7 @@ pub async fn list_teams_paginated(
 
     let rows = client
         .query(
-            "SELECT t.id, t.name, t.description, t.avatar_url,
+            "SELECT t.id, t.name, t.slug, t.description, t.avatar_url,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -2141,6 +2297,7 @@ fn row_to_team_summary(row: &tokio_postgres::Row) -> TeamSummary {
     TeamSummary {
         id: row.get("id"),
         name: row.get("name"),
+        slug: row.get("slug"),
         description: row.get("description"),
         avatar_url: row.get("avatar_url"),
         owner: row_to_team_user_ref(
@@ -2191,6 +2348,7 @@ fn row_to_team_response(
     TeamResponse {
         id: team_row.get("id"),
         name: team_row.get("name"),
+        slug: team_row.get("slug"),
         description: team_row.get("description"),
         purpose: team_row.get("purpose"),
         avatar_url: team_row.get("avatar_url"),

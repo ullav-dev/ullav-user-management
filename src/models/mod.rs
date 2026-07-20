@@ -403,6 +403,7 @@ pub struct TeamMemberResponse {
 pub struct TeamResponse {
     pub id: Uuid,
     pub name: String,
+    pub slug: String,
     pub description: Option<String>,
     pub purpose: Option<String>,
     pub avatar_url: Option<String>,
@@ -418,6 +419,7 @@ pub struct TeamResponse {
 pub struct TeamSummary {
     pub id: Uuid,
     pub name: String,
+    pub slug: String,
     pub description: Option<String>,
     pub avatar_url: Option<String>,
     pub owner: TeamUserRef,
@@ -425,6 +427,15 @@ pub struct TeamSummary {
     pub member_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Minimal team lookup by slug — used by lagan-server to resolve
+/// `{team-slug}/{repo-slug}` clone URLs to a team UUID.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamLookup {
+    pub id: Uuid,
+    pub slug: String,
+    pub name: String,
 }
 
 /// Paginated list of teams returned by admin list endpoint.
@@ -461,6 +472,7 @@ pub struct CreateTeamRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateTeamRequest {
     pub name: Option<String>,
+    pub slug: Option<String>,
     pub description: Option<String>,
     pub purpose: Option<String>,
     pub avatar_url: Option<String>,
@@ -551,6 +563,7 @@ pub struct AdminCreateTeamRequest {
 #[derive(Debug, Deserialize)]
 pub struct AdminUpdateTeamRequest {
     pub name: Option<String>,
+    pub slug: Option<String>,
     pub description: Option<String>,
     pub purpose: Option<String>,
     pub avatar_url: Option<String>,

@@ -18,6 +18,7 @@ use uuid::Uuid;
 pub struct ActiveTeamInfo {
     pub team_id: String,
     pub name: String,
+    pub slug: String,
     pub role: String,
     /// Names of custom team roles assigned to this member.
     pub team_roles: Vec<String>,
@@ -1323,6 +1324,22 @@ pub async fn get_team_by_slug(pool: &Pool, slug: &str) -> Result<TeamLookup, App
     })
 }
 
+/// The reverse of `get_team_by_slug` — used by lagan-server to backfill its
+/// local slug cache for repos created before this field existed (or any
+/// other case where it only has a team id on hand, not a slug).
+pub async fn get_team_slug_by_id(pool: &Pool, team_id: Uuid) -> Result<TeamLookup, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt("SELECT id, slug, name FROM teams WHERE id = $1", &[&team_id])
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(TeamLookup {
+        id: row.get("id"),
+        slug: row.get("slug"),
+        name: row.get("name"),
+    })
+}
+
 /// Create a team and atomically add the owner as the first active member.
 /// Returns the new team's UUID.
 pub async fn create_team(
@@ -1809,7 +1826,7 @@ pub async fn get_user_active_teams(
     let client = pool.get().await?;
     let rows = client
         .query(
-            "SELECT t.id::text AS team_id, t.name,
+            "SELECT t.id::text AS team_id, t.name, t.slug,
                     CASE
                         WHEN tm.user_id = t.owner_id  THEN 'owner'
                         WHEN tm.user_id = t.leader_id THEN 'leader'
@@ -1861,6 +1878,7 @@ pub async fn get_user_active_teams(
             ActiveTeamInfo {
                 team_id,
                 name: r.get("name"),
+                slug: r.get("slug"),
                 role: r.get("role"),
                 team_roles: r.get("team_role_names"),
                 product_roles,

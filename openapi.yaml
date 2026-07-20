@@ -443,6 +443,34 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /teams/{id}/slug:
+    get:
+      summary: Resolve a team id to its slug/name
+      description: |
+        The reverse of `/teams/by-slug/{slug}` — same auth tier (any
+        authenticated user, no membership check). Used by lagan-server to
+        backfill its local slug cache for repos created before this field
+        existed.
+      operationId: getTeamSlug
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      responses:
+        '200':
+          description: Team lookup
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamLookup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /teams/{id}:
     get:
       summary: Get team details

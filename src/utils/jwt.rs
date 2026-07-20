@@ -27,6 +27,12 @@ pub struct SubscriptionClaim {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamClaim {
     pub name: String,
+    /// URL-safe unique slug — lets downstream services (lagan) build
+    /// `{team-slug}/{repo-slug}` clone URLs without an extra lookup.
+    /// Defaults to empty string so tokens issued before this field was added
+    /// still decode.
+    #[serde(default)]
+    pub slug: String,
     /// Positional role: `"owner"`, `"leader"`, or `"member"`.
     pub role: String,
     /// Custom team roles assigned to this member (e.g. `"Approver"`, `"Editor"`).
@@ -122,6 +128,7 @@ pub async fn build_identity_claims(
         .into_iter()
         .map(|t| (t.team_id, TeamClaim {
             name: t.name,
+            slug: t.slug,
             role: t.role,
             team_roles: t.team_roles,
             product_roles: t.product_roles,

@@ -412,6 +412,65 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /teams/by-slug/{slug}:
+    get:
+      summary: Resolve a team slug to its id/name
+      description: |
+        Open to any authenticated user, no membership check — same tier as
+        `/users/resolve`. This is what lagan-server calls to translate
+        `{team-slug}/{repo-slug}` clone URLs to a team UUID.
+      operationId: getTeamBySlug
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Team lookup
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamLookup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /teams/{id}/slug:
+    get:
+      summary: Resolve a team id to its slug/name
+      description: |
+        The reverse of `/teams/by-slug/{slug}` — same auth tier (any
+        authenticated user, no membership check). Used by lagan-server to
+        backfill its local slug cache for repos created before this field
+        existed.
+      operationId: getTeamSlug
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+      responses:
+        '200':
+          description: Team lookup
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamLookup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /teams/{id}:
     get:
       summary: Get team details
@@ -1400,6 +1459,9 @@ components:
           format: uuid
         name:
           type: string
+        slug:
+          type: string
+          description: URL-safe, unique identifier used by lagan's `{team-slug}/{repo-slug}` clone URLs
         description:
           type: string
           nullable: true
@@ -1434,6 +1496,9 @@ components:
           format: uuid
         name:
           type: string
+        slug:
+          type: string
+          description: URL-safe, unique identifier used by lagan's `{team-slug}/{repo-slug}` clone URLs
         description:
           type: string
           nullable: true
@@ -1453,6 +1518,18 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    TeamLookup:
+      description: Minimal team lookup by slug
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
 
     TeamsPage:
       type: object
@@ -1492,6 +1569,10 @@ components:
         name:
           type: string
           minLength: 1
+        slug:
+          type: string
+          description: Lowercase letters, numbers, and single hyphens only. Must be unique across all teams.
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
         description:
           type: string
           nullable: true
@@ -1548,6 +1629,10 @@ components:
         name:
           type: string
           minLength: 1
+        slug:
+          type: string
+          description: Lowercase letters, numbers, and single hyphens only. Must be unique across all teams.
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
         description:
           type: string
           nullable: true

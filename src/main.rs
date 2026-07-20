@@ -405,6 +405,8 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::teams::list_my_teams)
                     .service(handlers::teams::accept_invitation)
                     .service(handlers::teams::decline_invitation)
+                    .service(handlers::teams::get_team_by_slug)
+                    .service(handlers::teams::get_team_slug)
                     .service(handlers::teams::create_team)
                     .service(handlers::teams::get_team)
                     .service(handlers::teams::update_team)

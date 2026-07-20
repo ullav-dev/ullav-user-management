@@ -60,6 +60,37 @@ pub async fn create_team(
     Ok(HttpResponse::Created().json(team))
 }
 
+/// `GET /teams/by-slug/{slug}` — resolve a team slug to its id/name. Open to
+/// any authenticated user (no membership check) — same tier as
+/// `/users/resolve`: this is what lagan-server calls to translate
+/// `{team-slug}/{repo-slug}` clone URLs, and exposes nothing beyond what a
+/// team's own public slug/name already imply.
+#[get("/teams/by-slug/{slug}")]
+pub async fn get_team_by_slug(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    claims_from_req(&req)?;
+    let team = db::get_team_by_slug(&state.pool, &path.into_inner()).await?;
+    Ok(HttpResponse::Ok().json(team))
+}
+
+/// `GET /teams/{id}/slug` — resolve a team id to its slug/name. Same auth
+/// tier as `/teams/by-slug/{slug}` (any authenticated user, no membership
+/// check) — the reverse lookup, used by lagan-server to backfill its local
+/// slug cache for repos created before this field existed.
+#[get("/teams/{id}/slug")]
+pub async fn get_team_slug(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    claims_from_req(&req)?;
+    let team = db::get_team_slug_by_id(&state.pool, path.into_inner()).await?;
+    Ok(HttpResponse::Ok().json(team))
+}
+
 /// `GET /teams/{id}` — get team details; caller must be an active member.
 #[get("/teams/{id}")]
 pub async fn get_team(
@@ -114,6 +145,7 @@ pub async fn update_team(
         &state.pool,
         team_id,
         body.name.as_deref(),
+        body.slug.as_deref(),
         body.description.as_deref(),
         body.purpose.as_deref(),
         body.avatar_url.as_deref(),

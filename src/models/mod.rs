@@ -151,6 +151,16 @@ where
     Ok(Some(Option::<String>::deserialize(d)?))
 }
 
+/// Same as [`deserialize_nullable_string`], but for a nullable UUID field —
+/// used by `AdminUpdateTeamRequest.organization_id` so a PATCH can distinguish
+/// "omit → no change" from `null → unassign the team's organization".
+pub fn deserialize_nullable_uuid<'de, D>(d: D) -> Result<Option<Option<Uuid>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::<Uuid>::deserialize(d)?))
+}
+
 /// A user account stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -407,6 +417,7 @@ pub struct TeamResponse {
     pub description: Option<String>,
     pub purpose: Option<String>,
     pub avatar_url: Option<String>,
+    pub organization_id: Option<Uuid>,
     pub owner: TeamUserRef,
     pub leader: TeamUserRef,
     pub members: Vec<TeamMemberResponse>,
@@ -421,6 +432,7 @@ pub struct TeamSummary {
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
+    pub organization_id: Option<Uuid>,
     pub avatar_url: Option<String>,
     pub owner: TeamUserRef,
     pub leader: TeamUserRef,
@@ -569,6 +581,34 @@ pub struct AdminUpdateTeamRequest {
     pub avatar_url: Option<String>,
     pub owner_id: Option<Uuid>,
     pub leader_id: Option<Uuid>,
+    /// Omit to leave unchanged; `null` unassigns the team's organization; a UUID assigns/reassigns it.
+    #[serde(default, deserialize_with = "deserialize_nullable_uuid")]
+    pub organization_id: Option<Option<Uuid>>,
+}
+
+/// An organization — a new tenant boundary that owns Teams. Fully optional:
+/// a team with no organization behaves exactly as it always has.
+#[derive(Debug, Clone, Serialize)]
+pub struct Organization {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminCreateOrganizationRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminUpdateOrganizationRequest {
+    pub name: Option<String>,
+    pub slug: Option<String>,
+    pub description: Option<String>,
 }
 
 // ── Password reset tokens ─────────────────────────────────────────────────────

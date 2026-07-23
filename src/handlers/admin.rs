@@ -2,10 +2,10 @@ use crate::{
     db,
     errors::AppError,
     models::{
-        AdminAddTeamMemberRequest, AdminCreateSubscriptionRequest, AdminCreateTeamRequest,
-        AdminCreateUserRequest, AdminUpdateSubscriptionRequest, AdminUpdateTeamRequest,
-        AdminUpdateUserRequest, AssignProductRoleRequest, CreatePermissionRequest,
-        CreatePlanRequest, CreateRoleRequest,
+        AdminAddTeamMemberRequest, AdminCreateOrganizationRequest, AdminCreateSubscriptionRequest,
+        AdminCreateTeamRequest, AdminCreateUserRequest, AdminUpdateOrganizationRequest,
+        AdminUpdateSubscriptionRequest, AdminUpdateTeamRequest, AdminUpdateUserRequest,
+        AssignProductRoleRequest, CreatePermissionRequest, CreatePlanRequest, CreateRoleRequest,
     },
     AppState,
 };
@@ -452,6 +452,7 @@ pub async fn update_team(
         body.avatar_url.as_deref(),
         body.owner_id,
         body.leader_id,
+        body.organization_id,
     )
     .await?;
     let team = db::get_team_response(&state.pool, *path).await?;
@@ -491,6 +492,73 @@ pub async fn remove_team_member(
 ) -> Result<HttpResponse, AppError> {
     let (team_id, user_id) = path.into_inner();
     db::remove_team_member(&state.pool, team_id, user_id).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ── Admin: Organizations ───────────────────────────────────────────────────────
+//
+// A new, optional tenant boundary that owns Teams (see migrations/031_organizations.sql).
+// Assigning/unassigning a team's organization is done via the existing
+// `PATCH /admin/teams/{id}` endpoint (organization_id is just another field on
+// AdminUpdateTeamRequest), not a dedicated endpoint here.
+
+/// `GET /admin/organizations` — list all organizations, alphabetically.
+#[get("/organizations")]
+pub async fn list_organizations(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+    let orgs = db::list_organizations(&state.pool).await?;
+    Ok(HttpResponse::Ok().json(orgs))
+}
+
+/// `POST /admin/organizations` — create an organization.
+#[post("/organizations")]
+pub async fn create_organization(
+    state: web::Data<AppState>,
+    body: web::Json<AdminCreateOrganizationRequest>,
+) -> Result<HttpResponse, AppError> {
+    if body.name.trim().is_empty() {
+        return Err(AppError::Validation("name must not be empty".into()));
+    }
+    let org = db::create_organization(&state.pool, body.name.trim(), body.description.as_deref()).await?;
+    Ok(HttpResponse::Created().json(org))
+}
+
+/// `GET /admin/organizations/{id}` — get a single organization.
+#[get("/organizations/{id}")]
+pub async fn get_organization(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let org = db::get_organization(&state.pool, *path).await?;
+    Ok(HttpResponse::Ok().json(org))
+}
+
+/// `PATCH /admin/organizations/{id}` — update an organization's editable fields.
+#[patch("/organizations/{id}")]
+pub async fn update_organization(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    body: web::Json<AdminUpdateOrganizationRequest>,
+) -> Result<HttpResponse, AppError> {
+    db::admin_update_organization(
+        &state.pool,
+        *path,
+        body.name.as_deref(),
+        body.slug.as_deref(),
+        body.description.as_deref(),
+    )
+    .await?;
+    let org = db::get_organization(&state.pool, *path).await?;
+    Ok(HttpResponse::Ok().json(org))
+}
+
+/// `DELETE /admin/organizations/{id}` — delete an organization. Teams that
+/// belonged to it become org-less, never cascade-deleted.
+#[delete("/organizations/{id}")]
+pub async fn delete_organization(
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    db::delete_organization(&state.pool, *path).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

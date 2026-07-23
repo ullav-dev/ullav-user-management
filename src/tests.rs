@@ -327,11 +327,11 @@ mod jwt_tests {
         let mut teams = HashMap::new();
         teams.insert(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Engineering".into(), slug: "engineering".into(), role: "owner".into(), team_roles: vec!["Approver".into()], product_roles: HashMap::new(), products: vec![] },
+            TeamClaim { name: "Engineering".into(), slug: "engineering".into(), role: "owner".into(), team_roles: vec!["Approver".into()], product_roles: HashMap::new(), products: vec![], organization_id: None, organization_name: None, organization_slug: None },
         );
         teams.insert(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Design".into(), slug: "design".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new(), products: vec![] },
+            TeamClaim { name: "Design".into(), slug: "design".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new(), products: vec![], organization_id: None, organization_name: None, organization_slug: None },
         );
         let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
             .expect("create_jwt should succeed");
@@ -340,6 +340,41 @@ mod jwt_tests {
         assert_eq!(claims.teams.len(), 2);
         assert!(claims.teams.values().any(|t| t.name == "Engineering" && t.role == "owner" && t.team_roles == ["Approver"]));
         assert!(claims.teams.values().any(|t| t.name == "Design" && t.role == "member" && t.team_roles.is_empty()));
+    }
+
+    #[test]
+    fn test_jwt_organization_claim_round_trip() {
+        let id = Uuid::new_v4();
+        let secret = "test_secret";
+        let mut teams = HashMap::new();
+        teams.insert(
+            Uuid::new_v4().to_string(),
+            TeamClaim {
+                name: "Engineering".into(), slug: "engineering".into(), role: "owner".into(),
+                team_roles: vec![], product_roles: HashMap::new(), products: vec![],
+                organization_id: Some("org-1".into()),
+                organization_name: Some("Acme Corp".into()),
+                organization_slug: Some("acme-corp".into()),
+            },
+        );
+        teams.insert(
+            Uuid::new_v4().to_string(),
+            // An org-less team — the common case, since organizations are optional.
+            TeamClaim { name: "Design".into(), slug: "design".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new(), products: vec![], organization_id: None, organization_name: None, organization_slug: None },
+        );
+        let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
+            .expect("create_jwt should succeed");
+        let claims = decode_jwt(&token, secret).expect("decode_jwt should succeed");
+
+        assert!(claims.teams.values().any(|t| {
+            t.name == "Engineering"
+                && t.organization_id.as_deref() == Some("org-1")
+                && t.organization_name.as_deref() == Some("Acme Corp")
+                && t.organization_slug.as_deref() == Some("acme-corp")
+        }));
+        assert!(claims.teams.values().any(|t| {
+            t.name == "Design" && t.organization_id.is_none() && t.organization_name.is_none()
+        }));
     }
 
     #[test]
@@ -362,7 +397,7 @@ mod jwt_tests {
         let mut teams = HashMap::new();
         teams.insert(
             team_id.clone(),
-            TeamClaim { name: "Engineering".into(), slug: "engineering".into(), role: "owner".into(), team_roles: vec![], product_roles, products: vec![] },
+            TeamClaim { name: "Engineering".into(), slug: "engineering".into(), role: "owner".into(), team_roles: vec![], product_roles, products: vec![], organization_id: None, organization_name: None, organization_slug: None },
         );
         let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
             .expect("create_jwt should succeed");
@@ -378,7 +413,7 @@ mod jwt_tests {
         // Simulate a token without product_roles (old format) — team_roles still present.
         let teams = HashMap::from([(
             Uuid::new_v4().to_string(),
-            TeamClaim { name: "Ops".into(), slug: "ops".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new(), products: vec![] },
+            TeamClaim { name: "Ops".into(), slug: "ops".into(), role: "member".into(), team_roles: vec![], product_roles: HashMap::new(), products: vec![], organization_id: None, organization_name: None, organization_slug: None },
         )]);
         let token = create_jwt(id, "testuser".into(), secret, 1, vec![], vec![], HashMap::new(), teams)
             .expect("create_jwt should succeed");
@@ -505,6 +540,7 @@ mod oauth2_claims_tests {
         teams.insert("team-1".to_string(), TeamClaim {
             name: "Engineering".into(), slug: "engineering".into(), role: "owner".into(),
             team_roles: vec![], product_roles: HashMap::new(), products: vec![],
+            organization_id: None, organization_name: None, organization_slug: None,
         });
         let claims = base_claims(vec!["admin".into()], subscriptions, teams);
 

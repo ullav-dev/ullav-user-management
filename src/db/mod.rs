@@ -4,10 +4,10 @@ pub mod ssh_keys;
 
 use crate::errors::AppError;
 use crate::models::{
-    AdminSubscription, PasswordResetToken, PlanResponse, ProductResponse, RoleWithPermissions,
-    Subscription, SubscriptionsPage, TeamLookup, TeamMemberResponse, TeamMemberRow,
-    TeamProductAccessResponse, TeamProductRef, TeamResponse, TeamRoleResponse, TeamSummary,
-    TeamUserRef, TeamsPage, User, UserTeamAccess, UserWithRoles, UsersPage,
+    AdminSubscription, Organization, PasswordResetToken, PlanResponse, ProductResponse,
+    RoleWithPermissions, Subscription, SubscriptionsPage, TeamLookup, TeamMemberResponse,
+    TeamMemberRow, TeamProductAccessResponse, TeamProductRef, TeamResponse, TeamRoleResponse,
+    TeamSummary, TeamUserRef, TeamsPage, User, UserTeamAccess, UserWithRoles, UsersPage,
 };
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
@@ -26,6 +26,15 @@ pub struct ActiveTeamInfo {
     pub product_roles: HashMap<String, String>,
     /// Product slugs enabled for the team at the team level (from `team_product_access`).
     pub products: Vec<String>,
+    /// The team's organization, if it has one assigned (most teams don't, yet).
+    pub organization: Option<ActiveOrganizationInfo>,
+}
+
+/// Minimal organization info attached to a team's JWT claim entry.
+pub struct ActiveOrganizationInfo {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
 }
 
 /// Insert a new user into the database, returning the full row.
@@ -1317,6 +1326,135 @@ async fn unique_team_slug(
     }
 }
 
+async fn unique_org_slug(
+    client: &impl deadpool_postgres::GenericClient,
+    name: &str,
+) -> Result<String, AppError> {
+    let base = {
+        let s = slugify(name);
+        if s.is_empty() { "org".to_string() } else { s }
+    };
+    let mut candidate = base.clone();
+    let mut n = 2;
+    loop {
+        let exists = client
+            .query_opt("SELECT 1 FROM organizations WHERE slug = $1", &[&candidate])
+            .await?
+            .is_some();
+        if !exists {
+            return Ok(candidate);
+        }
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+}
+
+fn row_to_organization(row: &tokio_postgres::Row) -> Organization {
+    Organization {
+        id: row.get("id"),
+        name: row.get("name"),
+        slug: row.get("slug"),
+        description: row.get("description"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+/// Create an organization, deriving a unique slug from its name.
+pub async fn create_organization(
+    pool: &Pool,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Organization, AppError> {
+    let client = pool.get().await?;
+    let slug = unique_org_slug(&client, name).await?;
+    let row = client
+        .query_one(
+            "INSERT INTO organizations (name, slug, description)
+             VALUES ($1, $2, $3)
+             RETURNING id, name, slug, description, created_at, updated_at",
+            &[&name, &slug, &description],
+        )
+        .await?;
+    Ok(row_to_organization(&row))
+}
+
+pub async fn get_organization(pool: &Pool, id: Uuid) -> Result<Organization, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT id, name, slug, description, created_at, updated_at
+             FROM organizations WHERE id = $1",
+            &[&id],
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(row_to_organization(&row))
+}
+
+/// List all organizations, alphabetically. Not paginated — organizations are
+/// expected to be few relative to users/teams; revisit if that stops holding.
+pub async fn list_organizations(pool: &Pool) -> Result<Vec<Organization>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT id, name, slug, description, created_at, updated_at
+             FROM organizations ORDER BY name",
+            &[],
+        )
+        .await?;
+    Ok(rows.iter().map(row_to_organization).collect())
+}
+
+/// Update an organization's editable fields. `None` parameters leave columns unchanged.
+pub async fn admin_update_organization(
+    pool: &Pool,
+    id: Uuid,
+    name: Option<&str>,
+    slug: Option<&str>,
+    description: Option<&str>,
+) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    if let Some(s) = slug {
+        validate_slug_format(s)?;
+        let taken = client
+            .query_opt("SELECT 1 FROM organizations WHERE slug = $1 AND id != $2", &[&s, &id])
+            .await?
+            .is_some();
+        if taken {
+            return Err(AppError::Conflict);
+        }
+    }
+    let updated = client
+        .execute(
+            "UPDATE organizations SET
+               name        = COALESCE($1, name),
+               slug        = COALESCE($2, slug),
+               description = COALESCE($3, description),
+               updated_at  = NOW()
+             WHERE id = $4",
+            &[&name, &slug, &description, &id],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Delete an organization. Teams that belonged to it become org-less
+/// (`teams.organization_id` is `ON DELETE SET NULL`), never cascade-deleted.
+pub async fn delete_organization(pool: &Pool, id: Uuid) -> Result<(), AppError> {
+    let client = pool.get().await?;
+    let deleted = client
+        .execute("DELETE FROM organizations WHERE id = $1", &[&id])
+        .await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
 /// Resolve a team slug to its id/name — used by lagan-server to translate
 /// `{team-slug}/{repo-slug}` clone URLs.
 pub async fn get_team_by_slug(pool: &Pool, slug: &str) -> Result<TeamLookup, AppError> {
@@ -1451,6 +1589,7 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
     let team_row = client
         .query_opt(
             "SELECT t.id, t.name, t.slug, t.description, t.purpose, t.avatar_url,
+                    t.organization_id,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -1538,6 +1677,7 @@ pub async fn list_user_teams(pool: &Pool, user_id: Uuid) -> Result<Vec<TeamSumma
     let rows = client
         .query(
             "SELECT t.id, t.name, t.slug, t.description, t.avatar_url,
+                    t.organization_id,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -1614,7 +1754,12 @@ pub async fn update_team(
     Ok(())
 }
 
-/// Admin variant: can also change owner_id.
+/// Admin variant: can also change owner_id and organization_id.
+///
+/// `organization_id: None` leaves the team's organization unchanged;
+/// `Some(None)` unassigns it; `Some(Some(id))` assigns/reassigns it (after
+/// verifying `id` refers to a real organization, so a bad id reports a clean
+/// validation error instead of a raw FK-violation 500).
 pub async fn admin_update_team(
     pool: &Pool,
     team_id: Uuid,
@@ -1625,24 +1770,42 @@ pub async fn admin_update_team(
     avatar_url: Option<&str>,
     owner_id: Option<Uuid>,
     leader_id: Option<Uuid>,
+    organization_id: Option<Option<Uuid>>,
 ) -> Result<(), AppError> {
     let client = pool.get().await?;
     if let Some(s) = slug {
         check_slug_available(&client, s, team_id).await?;
     }
+    if let Some(Some(org_id)) = organization_id {
+        let exists = client
+            .query_opt("SELECT 1 FROM organizations WHERE id = $1", &[&org_id])
+            .await?
+            .is_some();
+        if !exists {
+            return Err(AppError::Validation("organization not found".into()));
+        }
+    }
+    let clear_org = matches!(organization_id, Some(None));
+    let new_org_id = organization_id.flatten();
     let updated = client
         .execute(
             "UPDATE teams SET
-               name        = COALESCE($1, name),
-               slug        = COALESCE($2, slug),
-               description = COALESCE($3, description),
-               purpose     = COALESCE($4, purpose),
-               avatar_url  = COALESCE($5, avatar_url),
-               owner_id    = COALESCE($6, owner_id),
-               leader_id   = COALESCE($7, leader_id),
-               updated_at  = NOW()
-             WHERE id = $8",
-            &[&name, &slug, &description, &purpose, &avatar_url, &owner_id, &leader_id, &team_id],
+               name            = COALESCE($1, name),
+               slug            = COALESCE($2, slug),
+               description     = COALESCE($3, description),
+               purpose         = COALESCE($4, purpose),
+               avatar_url      = COALESCE($5, avatar_url),
+               owner_id        = COALESCE($6, owner_id),
+               leader_id       = COALESCE($7, leader_id),
+               organization_id = CASE
+                   WHEN $8::bool THEN NULL
+                   WHEN $9::uuid IS NOT NULL THEN $9::uuid
+                   ELSE organization_id
+               END,
+               updated_at      = NOW()
+             WHERE id = $10",
+            &[&name, &slug, &description, &purpose, &avatar_url, &owner_id, &leader_id,
+              &clear_org, &new_org_id, &team_id],
         )
         .await?;
     if updated == 0 {
@@ -1850,9 +2013,11 @@ pub async fn get_user_active_teams(
                         SELECT COALESCE(ARRAY_AGG(tpa.product_slug ORDER BY tpa.product_slug), '{}'::text[])
                         FROM team_product_access tpa
                         WHERE tpa.team_id = t.id
-                    ) AS product_slugs
+                    ) AS product_slugs,
+                    o.id::text AS organization_id, o.name AS organization_name, o.slug AS organization_slug
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
+             LEFT JOIN organizations o ON o.id = t.organization_id
              WHERE tm.user_id = $1 AND tm.status = 'active'
              ORDER BY t.name",
             &[&user_id],
@@ -1883,6 +2048,12 @@ pub async fn get_user_active_teams(
         .map(|r| {
             let team_id: String = r.get("team_id");
             let product_roles = product_roles_by_team.remove(&team_id).unwrap_or_default();
+            let organization_id: Option<String> = r.get("organization_id");
+            let organization = organization_id.map(|id| ActiveOrganizationInfo {
+                id,
+                name: r.get("organization_name"),
+                slug: r.get("organization_slug"),
+            });
             ActiveTeamInfo {
                 team_id,
                 name: r.get("name"),
@@ -1891,6 +2062,7 @@ pub async fn get_user_active_teams(
                 team_roles: r.get("team_role_names"),
                 product_roles,
                 products: r.get("product_slugs"),
+                organization,
             }
         })
         .collect())
@@ -1931,6 +2103,7 @@ pub async fn list_teams_paginated(
     let rows = client
         .query(
             "SELECT t.id, t.name, t.slug, t.description, t.avatar_url,
+                    t.organization_id,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -2325,6 +2498,7 @@ fn row_to_team_summary(row: &tokio_postgres::Row) -> TeamSummary {
         name: row.get("name"),
         slug: row.get("slug"),
         description: row.get("description"),
+        organization_id: row.get("organization_id"),
         avatar_url: row.get("avatar_url"),
         owner: row_to_team_user_ref(
             row, "owner_id", "owner_username", "owner_email",
@@ -2378,6 +2552,7 @@ fn row_to_team_response(
         description: team_row.get("description"),
         purpose: team_row.get("purpose"),
         avatar_url: team_row.get("avatar_url"),
+        organization_id: team_row.get("organization_id"),
         owner: row_to_team_user_ref(
             team_row, "owner_id", "owner_username", "owner_email",
             "owner_first_name", "owner_last_name", "owner_avatar_url",

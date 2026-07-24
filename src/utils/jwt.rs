@@ -52,6 +52,20 @@ pub struct TeamClaim {
     /// Defaults to an empty vec so tokens issued before this field was added still decode.
     #[serde(default)]
     pub products: Vec<String>,
+    /// The organization this team belongs to, if any (most teams don't, yet —
+    /// organizations are a new, optional concept). `None` for org-less teams
+    /// and for tokens issued before organizations existed. Name/slug are
+    /// denormalized alongside the id (matching how the team's own name/slug
+    /// are denormalized here) so a downstream service can display them
+    /// without an extra lookup — deliberately *not* a separate top-level
+    /// `organizations` claim, since every consumer that cares about a team's
+    /// organization already has the `TeamClaim` in hand.
+    #[serde(default)]
+    pub organization_id: Option<String>,
+    #[serde(default)]
+    pub organization_name: Option<String>,
+    #[serde(default)]
+    pub organization_slug: Option<String>,
 }
 
 /// JWT claims embedded in the token.
@@ -126,14 +140,23 @@ pub async fn build_identity_claims(
     let raw_teams = crate::db::get_user_active_teams(pool, user_id).await?;
     let teams: HashMap<String, TeamClaim> = raw_teams
         .into_iter()
-        .map(|t| (t.team_id, TeamClaim {
-            name: t.name,
-            slug: t.slug,
-            role: t.role,
-            team_roles: t.team_roles,
-            product_roles: t.product_roles,
-            products: t.products,
-        }))
+        .map(|t| {
+            let (organization_id, organization_name, organization_slug) = match t.organization {
+                Some(org) => (Some(org.id), Some(org.name), Some(org.slug)),
+                None => (None, None, None),
+            };
+            (t.team_id, TeamClaim {
+                name: t.name,
+                slug: t.slug,
+                role: t.role,
+                team_roles: t.team_roles,
+                product_roles: t.product_roles,
+                products: t.products,
+                organization_id,
+                organization_name,
+                organization_slug,
+            })
+        })
         .collect();
 
     Ok((roles, permissions, subscriptions, teams))

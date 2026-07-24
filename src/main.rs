@@ -518,6 +518,12 @@ async fn main() -> std::io::Result<()> {
                             .service(handlers::admin::list_plans)
                             .service(handlers::admin::create_plan)
                             .service(handlers::admin::delete_plan)
+                            // Organizations
+                            .service(handlers::admin::list_organizations)
+                            .service(handlers::admin::create_organization)
+                            .service(handlers::admin::get_organization)
+                            .service(handlers::admin::update_organization)
+                            .service(handlers::admin::delete_organization)
                             // Teams
                             .service(handlers::admin::list_teams)
                             .service(handlers::admin::create_team)

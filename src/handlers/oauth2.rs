@@ -243,6 +243,15 @@ fn resource_to_product_gate(resource: &str) -> Option<(&'static str, &'static st
         if host.contains("comad") || host.contains("dam") || port == 8080 {
             return Some(("comad", "dam:tools"));
         }
+        // Checked before the collection/port==8087 fallback below, since
+        // tack-server also defaults to port 8087 locally — hostname (real in
+        // staging/prod) disambiguates the two; in local dev, where both would
+        // otherwise share "localhost", give the `resource` a host containing
+        // "tack" (it doesn't need to be reachable, just parseable) to hit
+        // this branch instead of the collection one.
+        if host.contains("tack") {
+            return Some(("tack", "tack:tools"));
+        }
         if host.contains("collection") || port == 8087 {
             return Some(("collection", "collection:tools"));
         }
@@ -1133,4 +1142,45 @@ fn consent_html(params: &AuthorizeParams, username: &str, client_name: &str) -> 
         scope_items     = scope_items,
         switch_url_esc  = html_escape(&switch_url),
     )
+}
+
+#[cfg(test)]
+mod resource_gate_tests {
+    use super::resource_to_product_gate;
+
+    #[test]
+    fn tack_host_takes_priority_over_the_ambiguous_port_8087_collection_fallback() {
+        assert_eq!(
+            resource_to_product_gate("http://tack-server.stage.ullav.setanta.dev/mcp"),
+            Some(("tack", "tack:tools"))
+        );
+        // Local dev: no distinguishing hostname exists between tack-server and
+        // ullav-collection-server (both can default to port 8087), so a
+        // "tack"-containing host in the resource string is how a local
+        // client_credentials request reaches the tack gate instead of collection's.
+        assert_eq!(resource_to_product_gate("http://tack-local/mcp"), Some(("tack", "tack:tools")));
+    }
+
+    #[test]
+    fn collection_still_resolves_by_port_when_host_has_no_marker() {
+        assert_eq!(resource_to_product_gate("http://localhost:8087/mcp"), Some(("collection", "collection:tools")));
+    }
+
+    #[test]
+    fn comad_resolves_by_host_or_port() {
+        assert_eq!(resource_to_product_gate("http://comad.example.com/mcp"), Some(("comad", "dam:tools")));
+        assert_eq!(resource_to_product_gate("http://localhost:8080/mcp"), Some(("comad", "dam:tools")));
+    }
+
+    #[test]
+    fn cunav_resolves_by_unique_path_or_host() {
+        assert_eq!(resource_to_product_gate("http://localhost:8085/cunav/mcp"), Some(("cunav", "cunav:tools")));
+        assert_eq!(resource_to_product_gate("http://cunav.example.com/mcp"), Some(("cunav", "cunav:tools")));
+    }
+
+    #[test]
+    fn unrecognized_resource_returns_none() {
+        assert_eq!(resource_to_product_gate("not a url"), None);
+        assert_eq!(resource_to_product_gate("http://example.com/unrelated"), None);
+    }
 }

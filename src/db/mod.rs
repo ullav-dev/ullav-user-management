@@ -99,14 +99,20 @@ pub struct ResolvedUser {
     pub id: Uuid,
     pub username: String,
     pub avatar_url: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
 }
 
-/// Resolve a batch of user ids to their public username/avatar. Ids with no
-/// matching row are simply omitted from the result, not an error.
+/// Resolve a batch of user ids to their public username/avatar/display-name
+/// fields. Ids with no matching row are simply omitted from the result, not
+/// an error.
 pub async fn resolve_users(pool: &Pool, ids: &[Uuid]) -> Result<Vec<ResolvedUser>, AppError> {
     let client = pool.get().await?;
     let rows = client
-        .query("SELECT id, username, avatar_url FROM users WHERE id = ANY($1)", &[&ids])
+        .query(
+            "SELECT id, username, avatar_url, first_name, last_name FROM users WHERE id = ANY($1)",
+            &[&ids],
+        )
         .await?;
     Ok(rows
         .iter()
@@ -114,6 +120,8 @@ pub async fn resolve_users(pool: &Pool, ids: &[Uuid]) -> Result<Vec<ResolvedUser
             id: r.get("id"),
             username: r.get("username"),
             avatar_url: r.get("avatar_url"),
+            first_name: r.get("first_name"),
+            last_name: r.get("last_name"),
         })
         .collect())
 }

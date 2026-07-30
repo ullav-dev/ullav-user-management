@@ -533,7 +533,7 @@ All configuration is via environment variables (or a `.env` file):
 | `SMTP_PASSWORD` | — | SMTP authentication password (optional; see Docker secrets below) |
 | `SMTP_FROM` | — | From address for outgoing emails |
 | `APP_BASE_URL` | — | Default base URL used to build confirmation and reset links |
-| `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for MailHog) |
+| `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for Mailpit) |
 | `ALLOWED_APP_URLS` | — | Comma-separated allowlist of `app_url` values accepted in `POST /users` and `POST /auth/password-reset/request` (see Multi-tenant below) |
 | `CLANN_APP_URL` | — | Base URL of the Clann front-end; used to build checkout success/cancel and portal return URLs |
 | `STRIPE_SECRET_KEY` | — | Stripe secret key; omit to disable Stripe (supports `_FILE`) |
@@ -620,13 +620,14 @@ If `GEOBLOCK` is empty or `GEOIP_DB` is not set, geo-blocking is silently disabl
 
 ---
 
-#### Local email testing with MailHog
+#### Local email testing with Mailpit
 
-```bash
-docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog
-```
+Real MailHog has no Apple Silicon build and is unmaintained upstream; local dev uses
+[Mailpit](https://mailpit.axllent.org/) instead — a drop-in replacement with the same default
+ports and API, run as a native launchd service (see `ullav-platform`'s README for install/setup;
+already running if you used `scripts/start-all.sh`). SMTP on `1025`, web UI on `8025`.
 
-Then set in `.env`:
+Set in `.env`:
 
 ```
 SMTP_HOST=localhost

@@ -5,6 +5,7 @@ pub mod health;
 pub mod oauth2;
 pub mod pat;
 pub mod profile;
+pub mod service_clients;
 pub mod ssh_keys;
 pub mod subscriptions;
 pub mod teams;

@@ -400,6 +400,12 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::ssh_keys::create_ssh_key)
                     .service(handlers::ssh_keys::list_ssh_keys)
                     .service(handlers::ssh_keys::delete_ssh_key)
+                    // Self-service OAuth2 service clients — same self-service, ownership-scoped
+                    // pattern as PATs/SSH keys above. Distinct from the admin-only
+                    // /admin/oauth2/service-clients (global visibility, requires oauth2:manage).
+                    .service(handlers::service_clients::create_my_service_client)
+                    .service(handlers::service_clients::list_my_service_clients)
+                    .service(handlers::service_clients::revoke_my_service_client)
                     // Teams — permission-checked inside handlers; invite accept/decline registered
                     // before /{id} routes so static "invitations" segment wins over UUID param.
                     .service(handlers::teams::list_my_teams)

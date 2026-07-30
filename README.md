@@ -158,6 +158,19 @@ UUM enforces a product access gate at token issuance: if the requested `resource
 | `OAUTH2_ACCESS_TOKEN_TTL_MINUTES` | `60` | Access token lifetime |
 | `OAUTH2_REFRESH_TOKEN_TTL_DAYS` | `90` | Refresh token lifetime |
 
+### Service clients (`client_credentials` grant)
+
+A **service client** is a confidential OAuth2 client for unattended, machine-to-machine callers (an MCP server, an AWE automated task) with no human present to complete an interactive login. It authenticates via the `client_credentials` grant with a `client_id` + `client_secret`, and is bound to a dedicated `users` row (its "service account") so minted tokens flow through the same identity/claims pipeline as a human user's token.
+
+Two ways to provision one:
+
+| | Endpoint | Who | Scope of clients returned |
+|---|---|---|---|
+| Self-service | `POST` / `GET` / `DELETE /service-clients` | Any authenticated user | Only clients the caller created, bound to their own account. Requested scopes may not end in `:manage` or equal `admin`. |
+| Admin | `POST` / `GET` / `DELETE /admin/oauth2/service-clients` | Requires `oauth2:manage` permission (admin role) | All service clients platform-wide; can bind to any service account, including a newly-created one. |
+
+**How the secret is stored — `GET` can never return it.** `POST` generates a random secret and returns it in the response body **exactly once**; only its Argon2 hash (`client_secret_hash`, same hashing as user account passwords) is written to the `oauth2_clients` table. The `GET` (list) endpoints query only `client_id, client_name, allowed_scopes, created_at` — the hash column isn't in the select list, so there's no code path where it could leak, regardless of caller. The hash itself is one-way: it can verify a secret presented at `POST /oauth2/token` (`client_credentials` grant), but the raw secret can't be recovered from it. If a secret is lost, the fix is to delete the client and create a new one — there is no "reveal" or "reset" endpoint.
+
 ---
 
 ### POST /users
@@ -520,7 +533,7 @@ All configuration is via environment variables (or a `.env` file):
 | `SMTP_PASSWORD` | — | SMTP authentication password (optional; see Docker secrets below) |
 | `SMTP_FROM` | — | From address for outgoing emails |
 | `APP_BASE_URL` | — | Default base URL used to build confirmation and reset links |
-| `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for MailHog) |
+| `SMTP_NO_TLS` | `false` | Set `true` to use an unencrypted connection (e.g. for Mailpit) |
 | `ALLOWED_APP_URLS` | — | Comma-separated allowlist of `app_url` values accepted in `POST /users` and `POST /auth/password-reset/request` (see Multi-tenant below) |
 | `CLANN_APP_URL` | — | Base URL of the Clann front-end; used to build checkout success/cancel and portal return URLs |
 | `STRIPE_SECRET_KEY` | — | Stripe secret key; omit to disable Stripe (supports `_FILE`) |
@@ -607,13 +620,14 @@ If `GEOBLOCK` is empty or `GEOIP_DB` is not set, geo-blocking is silently disabl
 
 ---
 
-#### Local email testing with MailHog
+#### Local email testing with Mailpit
 
-```bash
-docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog
-```
+Real MailHog has no Apple Silicon build and is unmaintained upstream; local dev uses
+[Mailpit](https://mailpit.axllent.org/) instead — a drop-in replacement with the same default
+ports and API, run as a native launchd service (see `ullav-platform`'s README for install/setup;
+already running if you used `scripts/start-all.sh`). SMTP on `1025`, web UI on `8025`.
 
-Then set in `.env`:
+Set in `.env`:
 
 ```
 SMTP_HOST=localhost

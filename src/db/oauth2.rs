@@ -142,6 +142,48 @@ pub async fn delete_service_client(pool: &Pool, client_id: &str) -> Result<(), A
     Ok(())
 }
 
+/// List a user's own service clients, newest first (secret hash never
+/// included). Backs the self-service `GET /service-clients` endpoint — see
+/// `handlers::service_clients::list_my_service_clients`.
+pub async fn list_service_clients_for_user(
+    pool: &Pool,
+    user_id: Uuid,
+) -> Result<Vec<(String, String, Vec<String>, DateTime<Utc>)>, AppError> {
+    let conn = pool.get().await?;
+    let rows = conn
+        .query(
+            "SELECT client_id, client_name, allowed_scopes, registered_at
+             FROM oauth2_clients
+             WHERE service_account_user_id = $1 AND client_secret_hash IS NOT NULL
+             ORDER BY registered_at DESC",
+            &[&user_id],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+        .collect())
+}
+
+/// Revoke (delete) a service client, but only if it belongs to `user_id`.
+/// Returns `AppError::NotFound` if it doesn't exist or isn't theirs — mirrors
+/// `delete_service_client` above but ownership-scoped for the self-service
+/// endpoint (`handlers::service_clients::revoke_my_service_client`).
+pub async fn delete_service_client_owned(pool: &Pool, client_id: &str, user_id: Uuid) -> Result<(), AppError> {
+    let conn = pool.get().await?;
+    let n = conn
+        .execute(
+            "DELETE FROM oauth2_clients
+             WHERE client_id = $1 AND service_account_user_id = $2 AND client_secret_hash IS NOT NULL",
+            &[&client_id, &user_id],
+        )
+        .await?;
+    if n == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
 pub async fn register_oauth2_client(
     pool: &Pool,
     client_id: &str,

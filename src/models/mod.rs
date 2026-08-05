@@ -418,6 +418,7 @@ pub struct TeamResponse {
     pub purpose: Option<String>,
     pub avatar_url: Option<String>,
     pub organization_id: Option<Uuid>,
+    pub is_support_team: bool,
     pub owner: TeamUserRef,
     pub leader: TeamUserRef,
     pub members: Vec<TeamMemberResponse>,
@@ -433,6 +434,7 @@ pub struct TeamSummary {
     pub slug: String,
     pub description: Option<String>,
     pub organization_id: Option<Uuid>,
+    pub is_support_team: bool,
     pub avatar_url: Option<String>,
     pub owner: TeamUserRef,
     pub leader: TeamUserRef,
@@ -584,6 +586,9 @@ pub struct AdminUpdateTeamRequest {
     /// Omit to leave unchanged; `null` unassigns the team's organization; a UUID assigns/reassigns it.
     #[serde(default, deserialize_with = "deserialize_nullable_uuid")]
     pub organization_id: Option<Option<Uuid>>,
+    /// Omit to leave unchanged. Setting `true` unsets any other team's flag within
+    /// the same organization_id (NULL included) first — see `admin_update_team`.
+    pub is_support_team: Option<bool>,
 }
 
 /// An organization — a new tenant boundary that owns Teams. Fully optional:

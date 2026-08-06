@@ -453,6 +453,7 @@ pub async fn update_team(
         body.owner_id,
         body.leader_id,
         body.organization_id,
+        body.is_support_team,
     )
     .await?;
     let team = db::get_team_response(&state.pool, *path).await?;

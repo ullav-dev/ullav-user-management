@@ -1589,7 +1589,7 @@ pub async fn get_team_response(pool: &Pool, team_id: Uuid) -> Result<TeamRespons
     let team_row = client
         .query_opt(
             "SELECT t.id, t.name, t.slug, t.description, t.purpose, t.avatar_url,
-                    t.organization_id,
+                    t.organization_id, t.is_support_team,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -1677,7 +1677,7 @@ pub async fn list_user_teams(pool: &Pool, user_id: Uuid) -> Result<Vec<TeamSumma
     let rows = client
         .query(
             "SELECT t.id, t.name, t.slug, t.description, t.avatar_url,
-                    t.organization_id,
+                    t.organization_id, t.is_support_team,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -1760,6 +1760,7 @@ pub async fn update_team(
 /// `Some(None)` unassigns it; `Some(Some(id))` assigns/reassigns it (after
 /// verifying `id` refers to a real organization, so a bad id reports a clean
 /// validation error instead of a raw FK-violation 500).
+#[allow(clippy::too_many_arguments)]
 pub async fn admin_update_team(
     pool: &Pool,
     team_id: Uuid,
@@ -1771,8 +1772,9 @@ pub async fn admin_update_team(
     owner_id: Option<Uuid>,
     leader_id: Option<Uuid>,
     organization_id: Option<Option<Uuid>>,
+    is_support_team: Option<bool>,
 ) -> Result<(), AppError> {
-    let client = pool.get().await?;
+    let mut client = pool.get().await?;
     if let Some(s) = slug {
         check_slug_available(&client, s, team_id).await?;
     }
@@ -1787,7 +1789,41 @@ pub async fn admin_update_team(
     }
     let clear_org = matches!(organization_id, Some(None));
     let new_org_id = organization_id.flatten();
-    let updated = client
+
+    let tx = client.transaction().await?;
+
+    // At most one team per organization_id may be flagged as the Support
+    // team, and a Support team must belong to an organization — an org-less
+    // "default bucket" Support team is exactly the ambiguity that breaks
+    // once a second organization exists, so it's rejected outright rather
+    // than allowed and cleaned up later. Unset the current holder before
+    // setting the new one, same "unset then set" pattern as
+    // oauth2_signing_keys.is_primary (see 020_oauth2_key_rotation.sql) — a DB
+    // constraint can't express "at most one per org" as cleanly here since
+    // a plain UNIQUE index would still need this same NULL-handling logic.
+    if is_support_team == Some(true) {
+        let effective_org_id: Option<Uuid> = if organization_id.is_some() {
+            new_org_id
+        } else {
+            tx.query_one("SELECT organization_id FROM teams WHERE id = $1", &[&team_id])
+                .await?
+                .get("organization_id")
+        };
+        let Some(effective_org_id) = effective_org_id else {
+            tx.rollback().await.ok();
+            return Err(AppError::Validation(
+                "a team must have an organization_id set before it can be flagged as the Support team".into(),
+            ));
+        };
+        tx.execute(
+            "UPDATE teams SET is_support_team = FALSE
+             WHERE is_support_team = TRUE AND organization_id = $1",
+            &[&effective_org_id],
+        )
+        .await?;
+    }
+
+    let updated = tx
         .execute(
             "UPDATE teams SET
                name            = COALESCE($1, name),
@@ -1802,16 +1838,79 @@ pub async fn admin_update_team(
                    WHEN $9::uuid IS NOT NULL THEN $9::uuid
                    ELSE organization_id
                END,
+               is_support_team = COALESCE($10, is_support_team),
                updated_at      = NOW()
-             WHERE id = $10",
+             WHERE id = $11",
             &[&name, &slug, &description, &purpose, &avatar_url, &owner_id, &leader_id,
-              &clear_org, &new_org_id, &team_id],
+              &clear_org, &new_org_id, &is_support_team, &team_id],
         )
         .await?;
     if updated == 0 {
+        tx.rollback().await.ok();
         return Err(AppError::NotFound);
     }
+    tx.commit().await?;
     Ok(())
+}
+
+/// Outcome of resolving `GET /teams/support`. A plain `Option` isn't enough
+/// once `organization_id` is omitted: zero matches and "more than one
+/// organization each has its own Support team, caller must disambiguate" are
+/// different states that need different HTTP statuses (404 vs. 400) —
+/// collapsing them would make an org-agnostic caller silently pick one.
+pub enum SupportTeamLookup {
+    Found(TeamLookup),
+    NotFound,
+    /// Only possible when `organization_id` was omitted and more than one
+    /// organization has a Support team flagged.
+    Ambiguous,
+}
+
+/// `GET /teams/support` — resolve the Support team for an organization. With
+/// `organization_id` omitted, resolves unambiguously only while a single
+/// organization (or none) has a Support team flagged — see `SupportTeamLookup`.
+/// A Support team always belongs to an organization (enforced in
+/// `admin_update_team`), so there is no org-less "default bucket" to fall
+/// back to here.
+pub async fn get_support_team(
+    pool: &Pool,
+    organization_id: Option<Uuid>,
+) -> Result<SupportTeamLookup, AppError> {
+    let client = pool.get().await?;
+
+    if organization_id.is_none() {
+        let rows = client
+            .query(
+                "SELECT id, slug, name FROM teams WHERE is_support_team = TRUE",
+                &[],
+            )
+            .await?;
+        return Ok(match rows.len() {
+            0 => SupportTeamLookup::NotFound,
+            1 => SupportTeamLookup::Found(TeamLookup {
+                id: rows[0].get("id"),
+                slug: rows[0].get("slug"),
+                name: rows[0].get("name"),
+            }),
+            _ => SupportTeamLookup::Ambiguous,
+        });
+    }
+
+    let row = client
+        .query_opt(
+            "SELECT id, slug, name FROM teams
+             WHERE is_support_team = TRUE AND organization_id = $1",
+            &[&organization_id],
+        )
+        .await?;
+    Ok(match row {
+        Some(r) => SupportTeamLookup::Found(TeamLookup {
+            id: r.get("id"),
+            slug: r.get("slug"),
+            name: r.get("name"),
+        }),
+        None => SupportTeamLookup::NotFound,
+    })
 }
 
 /// Delete a team by ID. Cascades to team_members.
@@ -2103,7 +2202,7 @@ pub async fn list_teams_paginated(
     let rows = client
         .query(
             "SELECT t.id, t.name, t.slug, t.description, t.avatar_url,
-                    t.organization_id,
+                    t.organization_id, t.is_support_team,
                     t.owner_id,
                     o.username AS owner_username, o.email AS owner_email,
                     o.first_name AS owner_first_name, o.last_name AS owner_last_name,
@@ -2499,6 +2598,7 @@ fn row_to_team_summary(row: &tokio_postgres::Row) -> TeamSummary {
         slug: row.get("slug"),
         description: row.get("description"),
         organization_id: row.get("organization_id"),
+        is_support_team: row.get("is_support_team"),
         avatar_url: row.get("avatar_url"),
         owner: row_to_team_user_ref(
             row, "owner_id", "owner_username", "owner_email",
@@ -2553,6 +2653,7 @@ fn row_to_team_response(
         purpose: team_row.get("purpose"),
         avatar_url: team_row.get("avatar_url"),
         organization_id: team_row.get("organization_id"),
+        is_support_team: team_row.get("is_support_team"),
         owner: row_to_team_user_ref(
             team_row, "owner_id", "owner_username", "owner_email",
             "owner_first_name", "owner_last_name", "owner_avatar_url",

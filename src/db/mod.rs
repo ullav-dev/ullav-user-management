@@ -1792,12 +1792,15 @@ pub async fn admin_update_team(
 
     let tx = client.transaction().await?;
 
-    // At most one team per organization_id (NULL included — the default,
-    // org-less bucket every team lives in today) may be flagged as the
-    // Support team. Unset the current holder before setting the new one,
-    // same "unset then set" pattern as oauth2_signing_keys.is_primary (see
-    // 020_oauth2_key_rotation.sql) — a DB constraint can't express this
-    // cleanly since NULL organization_id values aren't equal to each other.
+    // At most one team per organization_id may be flagged as the Support
+    // team, and a Support team must belong to an organization — an org-less
+    // "default bucket" Support team is exactly the ambiguity that breaks
+    // once a second organization exists, so it's rejected outright rather
+    // than allowed and cleaned up later. Unset the current holder before
+    // setting the new one, same "unset then set" pattern as
+    // oauth2_signing_keys.is_primary (see 020_oauth2_key_rotation.sql) — a DB
+    // constraint can't express "at most one per org" as cleanly here since
+    // a plain UNIQUE index would still need this same NULL-handling logic.
     if is_support_team == Some(true) {
         let effective_org_id: Option<Uuid> = if organization_id.is_some() {
             new_org_id
@@ -1806,9 +1809,15 @@ pub async fn admin_update_team(
                 .await?
                 .get("organization_id")
         };
+        let Some(effective_org_id) = effective_org_id else {
+            tx.rollback().await.ok();
+            return Err(AppError::Validation(
+                "a team must have an organization_id set before it can be flagged as the Support team".into(),
+            ));
+        };
         tx.execute(
             "UPDATE teams SET is_support_team = FALSE
-             WHERE is_support_team = TRUE AND organization_id IS NOT DISTINCT FROM $1",
+             WHERE is_support_team = TRUE AND organization_id = $1",
             &[&effective_org_id],
         )
         .await?;
@@ -1844,26 +1853,64 @@ pub async fn admin_update_team(
     Ok(())
 }
 
-/// `GET /teams/support` — resolve the Support team for an organization (or the
-/// default, org-less bucket when `organization_id` is omitted). Returns `None`
-/// if no team has been flagged yet — a real, expected state, not an error.
+/// Outcome of resolving `GET /teams/support`. A plain `Option` isn't enough
+/// once `organization_id` is omitted: zero matches and "more than one
+/// organization each has its own Support team, caller must disambiguate" are
+/// different states that need different HTTP statuses (404 vs. 400) —
+/// collapsing them would make an org-agnostic caller silently pick one.
+pub enum SupportTeamLookup {
+    Found(TeamLookup),
+    NotFound,
+    /// Only possible when `organization_id` was omitted and more than one
+    /// organization has a Support team flagged.
+    Ambiguous,
+}
+
+/// `GET /teams/support` — resolve the Support team for an organization. With
+/// `organization_id` omitted, resolves unambiguously only while a single
+/// organization (or none) has a Support team flagged — see `SupportTeamLookup`.
+/// A Support team always belongs to an organization (enforced in
+/// `admin_update_team`), so there is no org-less "default bucket" to fall
+/// back to here.
 pub async fn get_support_team(
     pool: &Pool,
     organization_id: Option<Uuid>,
-) -> Result<Option<TeamLookup>, AppError> {
+) -> Result<SupportTeamLookup, AppError> {
     let client = pool.get().await?;
+
+    if organization_id.is_none() {
+        let rows = client
+            .query(
+                "SELECT id, slug, name FROM teams WHERE is_support_team = TRUE",
+                &[],
+            )
+            .await?;
+        return Ok(match rows.len() {
+            0 => SupportTeamLookup::NotFound,
+            1 => SupportTeamLookup::Found(TeamLookup {
+                id: rows[0].get("id"),
+                slug: rows[0].get("slug"),
+                name: rows[0].get("name"),
+            }),
+            _ => SupportTeamLookup::Ambiguous,
+        });
+    }
+
     let row = client
         .query_opt(
             "SELECT id, slug, name FROM teams
-             WHERE is_support_team = TRUE AND organization_id IS NOT DISTINCT FROM $1",
+             WHERE is_support_team = TRUE AND organization_id = $1",
             &[&organization_id],
         )
         .await?;
-    Ok(row.map(|r| TeamLookup {
-        id: r.get("id"),
-        slug: r.get("slug"),
-        name: r.get("name"),
-    }))
+    Ok(match row {
+        Some(r) => SupportTeamLookup::Found(TeamLookup {
+            id: r.get("id"),
+            slug: r.get("slug"),
+            name: r.get("name"),
+        }),
+        None => SupportTeamLookup::NotFound,
+    })
 }
 
 /// Delete a team by ID. Cascades to team_members.

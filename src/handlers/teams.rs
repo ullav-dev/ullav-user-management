@@ -93,17 +93,19 @@ pub async fn get_team_slug(
 
 #[derive(serde::Deserialize)]
 pub struct SupportTeamQuery {
-    /// Omit for the default, org-less bucket every team lives in today (no app
-    /// has adopted multi-tenancy except Tack yet) — see 032_team_support_flag.sql.
+    /// Omit to resolve unambiguously across every organization — works only
+    /// while at most one organization has a Support team flagged (today's
+    /// reality, no app besides Tack has adopted organizations). Once a second
+    /// organization gets its own Support team, an omitted `organization_id`
+    /// returns 400 rather than guessing — see `db::SupportTeamLookup`.
     pub organization_id: Option<Uuid>,
 }
 
 /// `GET /teams/support` — resolve the team flagged as "the Support team" for
-/// an organization (or the default bucket when `organization_id` is
-/// omitted). Same auth tier as `/teams/by-slug/{slug}` (any authenticated
-/// user, no membership check) — downstream ticketing apps like cunav need to
-/// resolve this without their service account being a member of the team.
-/// `404` if none is flagged yet — a real, expected state, not a server error.
+/// an organization. Same auth tier as `/teams/by-slug/{slug}` (any
+/// authenticated user, no membership check) — downstream ticketing apps like
+/// cunav need to resolve this without their service account being a member
+/// of the team.
 #[get("/teams/support")]
 pub async fn get_support_team(
     state: web::Data<AppState>,
@@ -111,10 +113,13 @@ pub async fn get_support_team(
     query: web::Query<SupportTeamQuery>,
 ) -> Result<HttpResponse, AppError> {
     claims_from_req(&req)?;
-    let team = db::get_support_team(&state.pool, query.organization_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    Ok(HttpResponse::Ok().json(team))
+    match db::get_support_team(&state.pool, query.organization_id).await? {
+        db::SupportTeamLookup::Found(team) => Ok(HttpResponse::Ok().json(team)),
+        db::SupportTeamLookup::NotFound => Err(AppError::NotFound),
+        db::SupportTeamLookup::Ambiguous => Err(AppError::Validation(
+            "more than one organization has a Support team flagged; pass organization_id".into(),
+        )),
+    }
 }
 
 /// `GET /teams/{id}` — get team details; caller must be an active member.

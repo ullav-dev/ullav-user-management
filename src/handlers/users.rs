@@ -1,6 +1,7 @@
 use crate::{
     db,
     errors::AppError,
+    middleware::auth::claims_from_req,
     models::CreateUserRequest,
     utils::{
         app_url::resolve_app_url,
@@ -9,7 +10,7 @@ use crate::{
     },
     AppState,
 };
-use actix_web::{get, post, web, HttpResponse};
+use actix_web::{get, post, web, HttpRequest, HttpResponse};
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
@@ -101,4 +102,35 @@ pub async fn resolve_users(
     }
     let users = db::resolve_users(&state.pool, &ids).await?;
     Ok(HttpResponse::Ok().json(users))
+}
+
+/// `GET /users/{id}/email` — resolve one user's email address. Deliberately
+/// separate from `/users/resolve` above, not a widening of it:
+/// `/users/resolve` stays open to any caller and never returns email; this
+/// endpoint requires authentication and product access, and exists
+/// specifically for cunav's "Send as email" to reach an internal reporter
+/// (a real UUM user, not the external_reporter_* fields cunav already has
+/// for a customer with no account) the same way it already can an external
+/// one. Gated on the caller having `cunav` product access on any team
+/// (`user_has_product_access`) — not restricted to a shared team with the
+/// target user, since a support agent legitimately needs to email any
+/// internal reporter a ticket lands in front of them for, not just ones on
+/// their own team. Every other product wanting the same capability needs
+/// its own product-access check here, not a blanket grant.
+#[get("/users/{id}/email")]
+pub async fn get_user_email(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_from_req(&req)?;
+    let caller_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::InvalidToken)?;
+
+    if !db::user_has_product_access(&state.pool, caller_id, "cunav").await? {
+        return Err(AppError::Forbidden);
+    }
+
+    let target_id = path.into_inner();
+    let user = db::get_user_by_id(&state.pool, target_id).await?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "email": user.email })))
 }

@@ -697,6 +697,33 @@ pub struct CreatePatResponse {
     pub created_at: DateTime<Utc>,
 }
 
+/// Request body for `POST /pat/mint-ephemeral` — see that handler's doc
+/// comment. Service-only (gated by `X-Git-Service-Secret`, not a user's own
+/// bearer token), which is why this takes `user_id` explicitly rather than
+/// reading it from `claims_from_req` the way `create_pat` does.
+#[derive(Debug, Deserialize)]
+pub struct MintEphemeralPatRequest {
+    pub user_id: Uuid,
+    /// Restricts the minted token to this one repo — always required here
+    /// (unlike the general PAT model's optional `repo_id`): an ephemeral
+    /// credential with no repo restriction would defeat the entire point
+    /// of this endpoint over just handing the caller the user's own
+    /// existing unrestricted PAT.
+    pub repo_id: Uuid,
+    /// Defaults to `["repo:read"]` (not `validate_git_scopes`' own default
+    /// of full read+write) — a CI checkout only ever needs to read.
+    pub scopes: Option<Vec<String>>,
+    pub ttl_secs: i64,
+}
+
+/// Response for `POST /pat/mint-ephemeral` — the only time this raw token
+/// is ever returned; same "shown once" discipline as `CreatePatResponse`.
+#[derive(Debug, Serialize)]
+pub struct MintEphemeralPatResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Admin audit view of a PAT — owner identity included, secret material never is.
 #[derive(Debug, Serialize)]
 pub struct AdminPatSummary {

@@ -92,6 +92,11 @@ pub struct ResolvedPat {
     pub id: Uuid,
     pub user_id: Uuid,
     pub scopes: Vec<String>,
+    /// `Some` restricts the exchanged JWT's `git_repo_id` claim to this one
+    /// repo (see `migrations/033_pat_repo_scope.sql`) — `None` for every
+    /// PAT created before that migration, and every user-created PAT since
+    /// (only `create_ephemeral_pat` below ever sets it).
+    pub repo_id: Option<Uuid>,
 }
 
 /// Look up an active (non-revoked, non-expired) PAT by its SHA-256 hash.
@@ -102,7 +107,7 @@ pub async fn get_active_pat_by_hash(pool: &Pool, token_hash: &str) -> Result<Res
     let conn = pool.get().await?;
     let row = conn
         .query_opt(
-            "SELECT id, user_id, scopes FROM personal_access_tokens
+            "SELECT id, user_id, scopes, repo_id FROM personal_access_tokens
              WHERE token_hash = $1
                AND revoked_at IS NULL
                AND (expires_at IS NULL OR expires_at > NOW())",
@@ -114,7 +119,44 @@ pub async fn get_active_pat_by_hash(pool: &Pool, token_hash: &str) -> Result<Res
         id: row.get(0),
         user_id: row.get(1),
         scopes: row.get(2),
+        repo_id: row.get(3),
     })
+}
+
+/// Creates a server-minted, repo-scoped PAT — used by
+/// `handlers::pat::mint_ephemeral` to give a CI run exactly the read access
+/// its triggering push's author already has to *one* repo, nothing broader.
+/// Unlike `create_pat`, the caller supplies `expires_at` directly (a short,
+/// bounded TTL in seconds/minutes, not the user-facing `expires_in_days`)
+/// and there's no `name` to display in a UI — this token is never listed via
+/// `GET /pat` for the user to manage by hand, only revocable the same way
+/// any PAT is (`DELETE /pat/{id}`, or simply letting it expire).
+pub async fn create_ephemeral_pat(
+    pool: &Pool,
+    user_id: Uuid,
+    repo_id: Uuid,
+    token_hash: &str,
+    token_prefix: &str,
+    scopes: &[String],
+    expires_at: DateTime<Utc>,
+) -> Result<Uuid, AppError> {
+    let conn = pool.get().await?;
+    let row = conn
+        .query_one(
+            "INSERT INTO personal_access_tokens (user_id, name, token_hash, token_prefix, scopes, expires_at, repo_id)
+             VALUES ($1, 'CI (ephemeral)', $2, $3, $4, $5, $6)
+             RETURNING id",
+            &[&user_id, &token_hash, &token_prefix, &scopes, &expires_at, &repo_id],
+        )
+        .await
+        .map_err(|e| {
+            if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+                AppError::Conflict
+            } else {
+                AppError::Database(e)
+            }
+        })?;
+    Ok(row.get(0))
 }
 
 /// Update `last_used_at` for a PAT. Best-effort — failures are logged, not

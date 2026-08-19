@@ -128,6 +128,7 @@ pub async fn resolve(
         roles,
         subscriptions,
         teams,
+        None, // SSH keys have no per-repo restriction concept
         &signing_key,
     )?;
 

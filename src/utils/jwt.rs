@@ -267,6 +267,15 @@ pub struct GitAccessClaims {
     pub subscriptions: HashMap<String, SubscriptionClaim>,
     #[serde(default)]
     pub teams: HashMap<String, TeamClaim>,
+    /// Restricts this credential to one specific repo (lagan-server's
+    /// `git_transport::permissions::can_read`/`can_write` deny any other
+    /// repo when set) — carried through from the exchanged PAT's own
+    /// `repo_id` (`migrations/033_pat_repo_scope.sql`). Omitted from the
+    /// token entirely when absent, not serialized as `null`, so this claim
+    /// is invisible on every git-access token minted before this field
+    /// existed and every regular user-created PAT since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_repo_id: Option<Uuid>,
 }
 
 /// Mint a short-lived `GitAccessClaims` token for a resolved git credential.
@@ -287,6 +296,7 @@ pub fn create_git_access_jwt(
     roles: Vec<String>,
     subscriptions: HashMap<String, SubscriptionClaim>,
     teams: HashMap<String, TeamClaim>,
+    git_repo_id: Option<Uuid>,
     key: &crate::utils::rs256::RsaKeyPair,
 ) -> Result<String, AppError> {
     let now = Utc::now();
@@ -302,6 +312,7 @@ pub fn create_git_access_jwt(
         roles,
         subscriptions,
         teams,
+        git_repo_id,
     };
     encode(&key.jwt_header(), &claims, key.encoding_key())
         .map_err(|e| AppError::Jwt(e.to_string()))

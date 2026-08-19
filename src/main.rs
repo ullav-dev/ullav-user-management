@@ -362,8 +362,12 @@ async fn main() -> std::io::Result<()> {
             // Git credential exchange — the credential itself (PAT / SSH key
             // fingerprint) is the auth, not a Bearer JWT, so these are
             // unauthenticated at the actix-web level and instead gated by
-            // `check_service_secret` inside each handler.
+            // `check_service_secret` inside each handler. mint_ephemeral is
+            // the same shape (no user bearer token to authenticate as, by
+            // design — see its own doc comment) even though it isn't an
+            // "exchange" of an existing credential.
             .service(handlers::pat::exchange)
+            .service(handlers::pat::mint_ephemeral)
             .service(handlers::ssh_keys::resolve);
 
         if enable_docs {

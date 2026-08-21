@@ -513,6 +513,7 @@ mod oauth2_claims_tests {
             client_id: "claude-desktop".into(),
             username: "testuser".into(),
             roles,
+            permissions: vec![],
             subscriptions,
             teams,
         }
@@ -593,8 +594,27 @@ mod oauth2_claims_tests {
             .claims;
 
         assert!(decoded.roles.is_empty());
+        assert!(decoded.permissions.is_empty());
         assert!(decoded.subscriptions.is_empty());
         assert!(decoded.teams.is_empty());
+    }
+
+    /// Confirmed against a real regression: `mint_access_token` used to compute
+    /// `permissions` via `build_identity_claims` and then discard it, so no
+    /// service-to-service (`client_credentials`) token ever carried a caller's
+    /// actual permissions -- awe-server's own `auth::Claims` requires this
+    /// field with no default and rejects any token missing it entirely
+    /// ("missing field `permissions`"), found via lagan-server's M12
+    /// local-stack testing (docs/github-actions-ci-plan.md section 4c).
+    #[test]
+    fn permissions_round_trip_through_mint_and_decode() {
+        let pair = RsaKeyPair::from_pem(TEST_RSA_KEY_PEM).expect("key should load");
+        let mut claims = base_claims(vec!["admin".into()], HashMap::new(), HashMap::new());
+        claims.permissions = vec!["oauth2:manage".into(), "users:read".into()];
+
+        let decoded = decode_roundtrip(&claims, &pair);
+
+        assert_eq!(decoded.permissions, vec!["oauth2:manage".to_string(), "users:read".to_string()]);
     }
 }
 

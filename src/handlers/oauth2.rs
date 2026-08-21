@@ -117,6 +117,17 @@ pub(crate) struct OAuth2Claims {
     /// field was added still decode.
     #[serde(default)]
     pub(crate) roles: Vec<String>,
+    /// Permissions assigned to the user (via their roles). Defaults to empty so
+    /// tokens minted before this field was added still decode. Was previously
+    /// computed by `build_identity_claims` and then silently discarded here --
+    /// found by tracing a real `client_credentials` token through
+    /// `awe-server`'s own `auth::Claims`, which requires this field with no
+    /// default and rejects any token missing it ("missing field `permissions`"),
+    /// confirmed via lagan-server's M12 local-stack testing
+    /// (docs/github-actions-ci-plan.md section 4c) -- every service-to-service
+    /// token this grant ever minted would have failed that same way.
+    #[serde(default)]
+    pub(crate) permissions: Vec<String>,
     /// Active subscriptions keyed by product slug. Defaults to an empty map so
     /// tokens minted before this field was added still decode.
     #[serde(default)]
@@ -136,8 +147,10 @@ async fn mint_access_token(
     client_id: &str,
 ) -> Result<String, AppError> {
     // Embed the same identity data `/auth/login` embeds, so MCP resource servers
-    // can apply the same plan-based quota/access logic as the REST APIs.
-    let (roles, _permissions, subscriptions, teams) =
+    // (and any other resource server validating this token, e.g. awe-server's
+    // own auth::Claims -- see this field's own doc comment) can apply the same
+    // plan-based quota/access and permission logic as the REST APIs.
+    let (roles, permissions, subscriptions, teams) =
         build_identity_claims(&state.pool, user_id).await?;
 
     let now = Utc::now();
@@ -151,6 +164,7 @@ async fn mint_access_token(
         client_id: client_id.to_owned(),
         username: username.to_owned(),
         roles,
+        permissions,
         subscriptions,
         teams,
     };

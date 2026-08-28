@@ -1,0 +1,22 @@
+-- Seeds the 'service' role, used to mark a user as a dedicated
+-- service-account identity for an OAuth2 client_credentials service client
+-- (see 024_oauth2_service_clients.sql). No prior migration ever created
+-- this role -- it has existed in production only because someone inserted
+-- it by hand at some point during lagan-server's own CI_OAUTH2_CLIENT_ID
+-- bootstrap, which means every *other* environment (a fresh staging
+-- cluster, a new local dev DB) silently lacks it: POST /admin/users/{id}/
+-- roles/service resolves its role_id via `SELECT id FROM roles WHERE
+-- name = 'service'`, and a zero-row match means a zero-row (silently
+-- no-op'd, no error) insert into user_roles -- the service-account user
+-- ends up with no distinguishing role at all, and every downstream check
+-- gating on `roles: ["service"]` (see lagan-server's own CLAUDE.md, and
+-- awe-server's AuthUser extractor skipping its product/team gate for this
+-- role) fails closed with no obviously-related error pointing back here.
+--
+-- Found while automating lagan-registry's own one-time service-account
+-- bootstrap (scripts/setup-lagan-registry-service-account.sh in
+-- ullav-helm) and checking prod's live `roles` table directly to see
+-- whether this role was migration-seeded or manually inserted -- it was
+-- the latter.
+
+INSERT INTO roles (name) VALUES ('service') ON CONFLICT DO NOTHING;

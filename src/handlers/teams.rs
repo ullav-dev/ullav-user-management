@@ -53,6 +53,7 @@ pub async fn create_team(
         body.purpose.as_deref(),
         body.avatar_url.as_deref(),
         owner_id,
+        None,
     )
     .await?;
 

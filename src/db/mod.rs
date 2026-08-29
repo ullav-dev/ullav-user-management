@@ -1392,6 +1392,46 @@ pub async fn get_organization(pool: &Pool, id: Uuid) -> Result<Organization, App
     Ok(row_to_organization(&row))
 }
 
+/// Look up an organization by its unique slug. `None` if none exists yet.
+pub async fn get_organization_by_slug(
+    pool: &Pool,
+    slug: &str,
+) -> Result<Option<Organization>, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT id, name, slug, description, created_at, updated_at
+             FROM organizations WHERE slug = $1",
+            &[&slug],
+        )
+        .await?;
+    Ok(row.as_ref().map(row_to_organization))
+}
+
+/// Idempotently ensure an organization with `slug` exists, creating it with
+/// `name` if absent; returns its id either way. Used to guarantee the single
+/// shared `clann` organization exists — the tenant boundary every Clann note
+/// is sharded under in tack-server (which requires an organization). The
+/// no-op `DO UPDATE` lets `RETURNING` yield the existing row's id on conflict
+/// (`DO NOTHING` would return no row).
+pub async fn ensure_organization_by_slug(
+    pool: &Pool,
+    slug: &str,
+    name: &str,
+) -> Result<Uuid, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "INSERT INTO organizations (name, slug)
+             VALUES ($1, $2)
+             ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug
+             RETURNING id",
+            &[&name, &slug],
+        )
+        .await?;
+    Ok(row.get("id"))
+}
+
 /// List all organizations, alphabetically. Not paginated — organizations are
 /// expected to be few relative to users/teams; revisit if that stops holding.
 pub async fn list_organizations(pool: &Pool) -> Result<Vec<Organization>, AppError> {
@@ -1495,6 +1535,7 @@ pub async fn create_team(
     purpose: Option<&str>,
     avatar_url: Option<&str>,
     owner_id: Uuid,
+    organization_id: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
     let mut client = pool.get().await?;
     let tx = client.transaction().await?;
@@ -1503,10 +1544,10 @@ pub async fn create_team(
 
     let row = tx
         .query_one(
-            "INSERT INTO teams (name, slug, description, purpose, avatar_url, owner_id, leader_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $6)
+            "INSERT INTO teams (name, slug, description, purpose, avatar_url, owner_id, leader_id, organization_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
              RETURNING id",
-            &[&name, &slug, &description, &purpose, &avatar_url, &owner_id],
+            &[&name, &slug, &description, &purpose, &avatar_url, &owner_id, &organization_id],
         )
         .await?;
 
@@ -1541,6 +1582,72 @@ pub async fn create_team(
 
     tx.commit().await?;
     Ok(team_id)
+}
+
+/// True if the user is an active member of at least one team belonging to
+/// the given organization.
+pub async fn user_has_team_in_org(
+    pool: &Pool,
+    user_id: Uuid,
+    organization_id: Uuid,
+) -> Result<bool, AppError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "SELECT EXISTS(
+                 SELECT 1 FROM team_members tm
+                 JOIN teams t ON t.id = tm.team_id
+                 WHERE tm.user_id = $1 AND tm.status = 'active'
+                   AND t.organization_id = $2
+             ) AS present",
+            &[&user_id, &organization_id],
+        )
+        .await?;
+    Ok(row.get("present"))
+}
+
+/// Human-friendly name for a user's auto-provisioned personal team:
+/// "<First Last>", falling back to "<First>" then the username.
+fn team_display_name(user: &User) -> String {
+    match (user.first_name.as_deref(), user.last_name.as_deref()) {
+        (Some(f), Some(l)) if !f.is_empty() && !l.is_empty() => format!("{f} {l}"),
+        (Some(f), _) if !f.is_empty() => f.to_string(),
+        _ => user.username.clone(),
+    }
+}
+
+/// Ensure the user has at least one team in the shared `clann` organization,
+/// so tack-server (which requires team membership and shards content by
+/// organization_id) can serve their default-private notes. Clann is
+/// single-tenant: one `clann` organization, and every user gets their own
+/// team — the people they invite to their family tree — within it.
+///
+/// Idempotent: returns `Ok(None)` if the user already belongs to a Clann-org
+/// team; otherwise creates a personal family team owned by them and returns
+/// `Ok(Some(team_id))`.
+pub async fn ensure_clann_team(pool: &Pool, user: &User) -> Result<Option<Uuid>, AppError> {
+    let org_id = ensure_organization_by_slug(pool, "clann", "Clann").await?;
+    if user_has_team_in_org(pool, user.id, org_id).await? {
+        return Ok(None);
+    }
+    let team_name = format!("{}'s Family", team_display_name(user));
+    let team_id = create_team(pool, &team_name, None, None, None, user.id, Some(org_id)).await?;
+    Ok(Some(team_id))
+}
+
+/// All active (email-confirmed) users. Used by the Clann-team retrofit
+/// backfill; user counts are small at Clann's scale, so this isn't paginated.
+pub async fn list_active_users(pool: &Pool) -> Result<Vec<User>, AppError> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT id, email, username, password_hash, is_active, first_name, last_name,
+                    avatar_url, created_at, updated_at, confirmation_token, confirmation_token_expires_at
+             FROM users WHERE is_active = TRUE",
+            &[],
+        )
+        .await?;
+    Ok(rows.iter().map(row_to_user).collect())
 }
 
 /// Assign a team's "All" role (identified structurally via is_all, not its renameable

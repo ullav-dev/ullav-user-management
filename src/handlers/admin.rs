@@ -419,10 +419,36 @@ pub async fn create_team(
         body.purpose.as_deref(),
         body.avatar_url.as_deref(),
         body.owner_id,
+        None,
     )
     .await?;
     let team = db::get_team_response(&state.pool, team_id).await?;
     Ok(HttpResponse::Created().json(team))
+}
+
+/// `POST /admin/backfill/clann-teams` — ensure every active user has a team
+/// in the shared `clann` organization. Retrofit for users created before
+/// auto-provisioning at activation existed (see `db::ensure_clann_team`).
+/// Idempotent and safe to re-run; returns per-run counts. Note: affected
+/// users must obtain a fresh JWT (log out/in) before tack-server sees their
+/// new team, since team claims are stamped at token-issue time.
+#[post("/backfill/clann-teams")]
+pub async fn backfill_clann_teams(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+    let users = db::list_active_users(&state.pool).await?;
+    let mut created = 0u32;
+    let mut already = 0u32;
+    for user in &users {
+        match db::ensure_clann_team(&state.pool, user).await {
+            Ok(Some(_)) => created += 1,
+            Ok(None) => already += 1,
+            Err(e) => log::error!("backfill_clann_teams: user {}: {e}", user.id),
+        }
+    }
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "active_users": users.len(),
+        "teams_created": created,
+        "already_covered": already,
+    })))
 }
 
 /// `GET /admin/teams/{id}` — full team detail including all members.

@@ -240,6 +240,18 @@ async fn activate_by_token(pool: &Pool, token: &str) -> Result<HttpResponse, App
                 Err(e) => log::error!("Failed to provision {product} subscription for user {}: {e}", user.id),
             }
         }
+
+        // Ensure the user has a team in the shared Clann organization. Clann
+        // is single-tenant: one `clann` org, every user in at least one team
+        // (the people they invite to their tree). tack-server requires team
+        // membership and shards notes by organization_id, so without this a
+        // solo user's default-private notes have nowhere to live. Idempotent;
+        // a failure is logged, never fatal to activation.
+        match db::ensure_clann_team(pool, &user).await {
+            Ok(Some(team_id)) => log::info!("Provisioned Clann team {team_id} for user {}", user.id),
+            Ok(None) => {}
+            Err(e) => log::error!("Failed to ensure Clann team for user {}: {e}", user.id),
+        }
     }
 
     Ok(HttpResponse::NoContent().finish())

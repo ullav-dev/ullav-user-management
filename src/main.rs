@@ -237,6 +237,15 @@ async fn main() -> std::io::Result<()> {
         log::error!("Failed to seed admin user: {}", e);
     }
 
+    // Ensure the shared Clann organization exists (idempotent). Clann is
+    // single-tenant: every Clann team/user lives under this one organization,
+    // which tack-server uses as its content shard key. Uses the existing row
+    // in envs where it was already created manually (matched by slug).
+    match db::ensure_organization_by_slug(&pool, "clann", "Clann").await {
+        Ok(id) => log::info!("Clann organization ensured (id {id})"),
+        Err(e) => log::error!("Failed to ensure Clann organization: {}", e),
+    }
+
     // Payment configuration — optional; endpoints return 501 when not set.
     let stripe_config = build_stripe_config();
     let paypal_config = build_paypal_config();
@@ -504,6 +513,7 @@ async fn main() -> std::io::Result<()> {
                             // Users
                             .service(handlers::admin::list_users)
                             .service(handlers::admin::create_user)
+                            .service(handlers::admin::backfill_clann_teams)
                             .service(handlers::admin::get_user)
                             .service(handlers::admin::update_user)
                             .service(handlers::admin::delete_user)
